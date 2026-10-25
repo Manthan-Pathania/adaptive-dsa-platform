@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: adaptive_dsa_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dsa_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsa_password}
+      POSTGRES_DB: ${POSTGRES_DB:-dsa_db}
+    ports:
+      # Bound to localhost for local development
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dsa_user} -d ${POSTGRES_DB:-dsa_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - dsa_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: adaptive_dsa_redis
+    restart: unless-stopped
+    ports:
+      # Bound to localhost for local development
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+    networks:
+      - dsa_network
+
+networks:
+  dsa_network:
+    driver: bridge
+
+volumes:
+  pgdata:
+    name: adaptive_dsa_pgdata
+  redisdata:
+    name: adaptive_dsa_redisdata

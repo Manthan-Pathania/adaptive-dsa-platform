@@ -1,0 +1,38 @@
+# Binaries & build outputs
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test outputs
+*.out
+*.test
+coverage.html
+coverage.out
+
+# Dependency directories
+vendor/
+
+# Environment files & secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+
+# IDE & Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker local data volumes
+pgdata/
+redisdata/

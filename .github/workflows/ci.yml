@@ -1,0 +1,91 @@
+name: CI Quality Gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test:
+    name: Go Foundation Tests & Verification
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dsa_user
+          POSTGRES_PASSWORD: dsa_password
+          POSTGRES_DB: dsa_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      - name: Verify Go Modules
+        run: |
+          go mod verify
+          git diff --exit-code go.mod go.sum
+
+      - name: Code Formatting Check
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following files are not properly formatted with gofmt:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run Go Vet
+        run: go vet ./...
+
+      - name: Run Unit Tests with Race Detection
+        run: go test -v -race -short ./...
+
+      - name: Verify sqlc Query Generation
+        run: |
+          go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.27.0 generate
+          git diff --exit-code internal/database/generated/
+
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: postgres://dsa_user:dsa_password@localhost:5432/dsa_db?sslmode=disable
+        run: |
+          go run ./cmd/migrate up
+          go run ./cmd/migrate status
+
+      - name: Run Integration Tests
+        env:
+          DATABASE_URL: postgres://dsa_user:dsa_password@localhost:5432/dsa_db?sslmode=disable
+        run: |
+          go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Build Server Binary
+        run: go build -trimpath -ldflags="-s -w" -o bin/server ./cmd/server
+
+      - name: Build Migration Binary
+        run: go build -trimpath -ldflags="-s -w" -o bin/migrate ./cmd/migrate
+
+      - name: Build Admin CLI Binary
+        run: go build -trimpath -ldflags="-s -w" -o bin/admin ./cmd/admin
+
+      - name: Build Question Bank Importer CLI Binary
+        run: go build -trimpath -ldflags="-s -w" -o bin/import-questions ./cmd/import-questions
