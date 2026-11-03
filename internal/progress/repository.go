@@ -21,12 +21,15 @@ type Repository interface {
 	ListUserRecentAttempts(ctx context.Context, userID uuid.UUID, limit int32) ([]QuestionAttempt, error)
 
 	GetUserQuestionProgress(ctx context.Context, userID, questionID uuid.UUID) (*UserQuestionProgress, error)
+	ListUserQuestionProgress(ctx context.Context, userID uuid.UUID) ([]UserQuestionProgress, error)
 	UpsertUserQuestionProgress(ctx context.Context, p *UserQuestionProgress) (*UserQuestionProgress, error)
+	DeleteUserQuestionProgress(ctx context.Context, userID, questionID uuid.UUID) error
 	GetUserProgressStats(ctx context.Context, userID uuid.UUID) (*UserProgressStats, error)
 
 	GetRevisionSchedule(ctx context.Context, userID, questionID uuid.UUID) (*RevisionSchedule, error)
 	UpsertRevisionSchedule(ctx context.Context, s *RevisionSchedule) (*RevisionSchedule, error)
 	ListDueRevisions(ctx context.Context, userID uuid.UUID, asOf time.Time, limit, offset int32) ([]RevisionSchedule, int64, error)
+	ExportUserData(ctx context.Context, userID uuid.UUID) (*UserExportData, error)
 
 	ExecTx(ctx context.Context, fn func(repo Repository) error) error
 }
@@ -252,6 +255,48 @@ func (r *pgxRepository) GetUserQuestionProgress(ctx context.Context, userID, que
 	}, nil
 }
 
+func (r *pgxRepository) ListUserQuestionProgress(ctx context.Context, userID uuid.UUID) ([]UserQuestionProgress, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, user_id, question_id, status, first_solved_at, last_solved_at,
+		       solve_count, independent_solve_count, total_time_spent_secs,
+		       is_bookmarked, personal_notes, created_at, updated_at
+		FROM user_question_progress
+		WHERE user_id = $1
+		ORDER BY updated_at DESC`, toPgUUID(userID))
+	if err != nil {
+		return nil, fmt.Errorf("list user question progress: %w", err)
+	}
+	defer rows.Close()
+
+	var list []UserQuestionProgress
+	for rows.Next() {
+		var p UserQuestionProgress
+		var fSolved, lSolved *time.Time
+		var notes *string
+		if err := rows.Scan(
+			&p.ID, &p.UserID, &p.QuestionID, &p.Status, &fSolved, &lSolved,
+			&p.SolveCount, &p.IndependentSolveCount, &p.TotalTimeSpentSecs,
+			&p.IsBookmarked, &notes, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan progress row: %w", err)
+		}
+		p.FirstSolvedAt = fSolved
+		p.LastSolvedAt = lSolved
+		p.PersonalNotes = notes
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+func (r *pgxRepository) DeleteUserQuestionProgress(ctx context.Context, userID, questionID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM user_question_progress WHERE user_id = $1 AND question_id = $2`, toPgUUID(userID), toPgUUID(questionID))
+	if err != nil {
+		return fmt.Errorf("delete user question progress: %w", err)
+	}
+	_, _ = r.pool.Exec(ctx, `DELETE FROM revision_schedules WHERE user_id = $1 AND question_id = $2`, toPgUUID(userID), toPgUUID(questionID))
+	return nil
+}
+
 func (r *pgxRepository) UpsertUserQuestionProgress(ctx context.Context, p *UserQuestionProgress) (*UserQuestionProgress, error) {
 	var firstSolved, lastSolved pgtype.Timestamptz
 	if p.FirstSolvedAt != nil {
@@ -475,6 +520,101 @@ func (r *pgxRepository) ExecTx(ctx context.Context, fn func(repo Repository) err
 	return nil
 }
 
+func (r *pgxRepository) ExportUserData(ctx context.Context, userID uuid.UUID) (*UserExportData, error) {
+	now := time.Now().UTC()
+	export := &UserExportData{
+		UserID:     userID,
+		Progress:   make([]UserQuestionProgress, 0),
+		Attempts:   make([]QuestionAttempt, 0),
+		Revisions:  make([]RevisionSchedule, 0),
+		ExportedAt: now,
+	}
+
+	// 1. Progress
+	progRows, err := r.pool.Query(ctx, `
+		SELECT id, user_id, question_id, status, first_solved_at, last_solved_at,
+		       solve_count, independent_solve_count, total_time_spent_secs,
+		       is_bookmarked, personal_notes, created_at, updated_at
+		FROM user_question_progress
+		WHERE user_id = $1
+		ORDER BY updated_at DESC`, userID)
+	if err == nil {
+		defer progRows.Close()
+		for progRows.Next() {
+			var p UserQuestionProgress
+			var fSolved, lSolved *time.Time
+			var notes *string
+			if scanErr := progRows.Scan(
+				&p.ID, &p.UserID, &p.QuestionID, &p.Status, &fSolved, &lSolved,
+				&p.SolveCount, &p.IndependentSolveCount, &p.TotalTimeSpentSecs,
+				&p.IsBookmarked, &notes, &p.CreatedAt, &p.UpdatedAt,
+			); scanErr == nil {
+				p.FirstSolvedAt = fSolved
+				p.LastSolvedAt = lSolved
+				p.PersonalNotes = notes
+				export.Progress = append(export.Progress, p)
+			}
+		}
+	}
+
+	// 2. Attempts
+	attRows, err := r.pool.Query(ctx, `
+		SELECT a.id, a.user_id, a.question_id, a.outcome, a.time_spent_secs,
+		       a.difficulty_experienced, a.quality_rating, a.mistake_tags,
+		       a.approach_summary, a.code_snippet, a.created_at,
+		       q.title, q.slug, q.difficulty
+		FROM question_attempts a
+		JOIN questions q ON q.id = a.question_id
+		WHERE a.user_id = $1
+		ORDER BY a.created_at ASC`, userID)
+	if err == nil {
+		defer attRows.Close()
+		for attRows.Next() {
+			var a QuestionAttempt
+			var appSummary, code *string
+			if scanErr := attRows.Scan(
+				&a.ID, &a.UserID, &a.QuestionID, &a.Outcome, &a.TimeSpentSecs,
+				&a.DifficultyExperienced, &a.QualityRating, &a.MistakeTags,
+				&appSummary, &code, &a.CreatedAt,
+				&a.QuestionTitle, &a.QuestionSlug, &a.QuestionDifficulty,
+			); scanErr == nil {
+				a.ApproachSummary = appSummary
+				a.CodeSnippet = code
+				export.Attempts = append(export.Attempts, a)
+			}
+		}
+	}
+
+	// 3. Revisions
+	revRows, err := r.pool.Query(ctx, `
+		SELECT r.id, r.user_id, r.question_id, r.stability, r.difficulty,
+		       r.repetition_count, r.ease_factor, r.interval_days,
+		       r.next_review_at, r.last_reviewed_at, r.created_at, r.updated_at,
+		       q.title, q.slug, q.difficulty
+		FROM revision_schedules r
+		JOIN questions q ON q.id = r.question_id
+		WHERE r.user_id = $1
+		ORDER BY r.next_review_at ASC`, userID)
+	if err == nil {
+		defer revRows.Close()
+		for revRows.Next() {
+			var s RevisionSchedule
+			var lastRev *time.Time
+			if scanErr := revRows.Scan(
+				&s.ID, &s.UserID, &s.QuestionID, &s.Stability, &s.Difficulty,
+				&s.RepetitionCount, &s.EaseFactor, &s.IntervalDays,
+				&s.NextReviewAt, &lastRev, &s.CreatedAt, &s.UpdatedAt,
+				&s.QuestionTitle, &s.QuestionSlug, &s.QuestionDifficulty,
+			); scanErr == nil {
+				s.LastReviewedAt = lastRev
+				export.Revisions = append(export.Revisions, s)
+			}
+		}
+	}
+
+	return export, nil
+}
+
 // InMemoryRepository provides a fast in-memory implementation for unit testing.
 type InMemoryRepository struct {
 	mu        sync.RWMutex
@@ -556,6 +696,29 @@ func (m *InMemoryRepository) GetUserQuestionProgress(ctx context.Context, userID
 	}
 	res := p
 	return &res, nil
+}
+
+func (m *InMemoryRepository) ListUserQuestionProgress(ctx context.Context, userID uuid.UUID) ([]UserQuestionProgress, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var list []UserQuestionProgress
+	for _, p := range m.progress {
+		if p.UserID == userID {
+			list = append(list, p)
+		}
+	}
+	return list, nil
+}
+
+func (m *InMemoryRepository) DeleteUserQuestionProgress(ctx context.Context, userID, questionID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := progressKey(userID, questionID)
+	delete(m.progress, key)
+	delete(m.revisions, key)
+	return nil
 }
 
 func (m *InMemoryRepository) UpsertUserQuestionProgress(ctx context.Context, p *UserQuestionProgress) (*UserQuestionProgress, error) {
@@ -717,3 +880,34 @@ func (m *InMemoryRepository) ExecTx(ctx context.Context, fn func(repo Repository
 	}
 	return nil
 }
+
+func (m *InMemoryRepository) ExportUserData(ctx context.Context, userID uuid.UUID) (*UserExportData, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	export := &UserExportData{
+		UserID:     userID,
+		Progress:   make([]UserQuestionProgress, 0),
+		Attempts:   make([]QuestionAttempt, 0),
+		Revisions:  make([]RevisionSchedule, 0),
+		ExportedAt: time.Now().UTC(),
+	}
+
+	for _, p := range m.progress {
+		if p.UserID == userID {
+			export.Progress = append(export.Progress, p)
+		}
+	}
+	for _, a := range m.attempts {
+		if a.UserID == userID {
+			export.Attempts = append(export.Attempts, a)
+		}
+	}
+	for _, r := range m.revisions {
+		if r.UserID == userID {
+			export.Revisions = append(export.Revisions, r)
+		}
+	}
+	return export, nil
+}
+

@@ -1,0 +1,57 @@
+# ==============================================================================
+# Adaptive DSA Platform - Caddy Edge Reverse Proxy Configuration
+# ==============================================================================
+
+{
+    # Global options
+    admin off
+    auto_https off # Managed via compose or explicit TLS directive in production
+}
+
+# HTTP / Edge Entrypoint
+:80 {
+    encode zstd gzip
+
+    # Defensive Security Headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(), camera=(), microphone=(), payment=(self 'https://checkout.razorpay.com')"
+        -Server
+    }
+
+    # API and Health Probes -> Go Backend Monolith
+    handle /api/* {
+        reverse_proxy backend:8080 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    handle /healthz {
+        reverse_proxy backend:8080
+    }
+
+    handle /readyz {
+        reverse_proxy backend:8080
+    }
+
+    # All web UI routes -> Next.js Frontend
+    handle {
+        reverse_proxy frontend:3000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Structured JSON Access Logging
+    log {
+        output stdout
+        format json
+    }
+}

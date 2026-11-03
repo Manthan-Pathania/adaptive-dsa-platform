@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -65,6 +66,8 @@ func (h *Handler) RegisterRoutes(r chi.Router, authMiddleware, csrfMiddleware fu
 
 			r.Post("/logout", h.HandleLogout)
 			r.Get("/me", h.HandleMe)
+			r.Get("/profile", h.HandleGetProfile)
+			r.Post("/profile", h.HandleUpdateProfile)
 		})
 	})
 }
@@ -319,3 +322,57 @@ func (h *Handler) validatePreAuthCSRF(w http.ResponseWriter, r *http.Request) bo
 	}
 	return true
 }
+
+// HandleGetProfile returns the candidate preparation profile.
+func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
+	user, ok := UserFromContext(r.Context())
+	if !ok || user == nil {
+		httperr.WriteJSON(w, r, http.StatusUnauthorized, "Unauthorized", "Authentication required", "UNAUTHORIZED")
+		return
+	}
+
+	profile, err := h.service.GetProfile(r.Context(), user.ID)
+	if err != nil {
+		httperr.WriteJSON(w, r, http.StatusInternalServerError, "Internal Server Error", "Failed to retrieve user profile", "INTERNAL_SERVER_ERROR")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(profile)
+}
+
+// HandleUpdateProfile creates or updates the user profile and onboarding settings.
+func (h *Handler) HandleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	user, ok := UserFromContext(r.Context())
+	if !ok || user == nil {
+		httperr.WriteJSON(w, r, http.StatusUnauthorized, "Unauthorized", "Authentication required", "UNAUTHORIZED")
+		return
+	}
+
+	if !h.requireJSONContentType(w, r) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	var req UserProfile
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httperr.BadRequest(w, r, "Malformed request body: valid JSON required")
+		return
+	}
+
+	req.UserID = user.ID
+	profile, err := h.service.UpdateProfile(r.Context(), &req)
+	if err != nil {
+		slog.Default().Error("failed to update user profile", "error", err)
+		httperr.WriteJSON(w, r, http.StatusInternalServerError, "Internal Server Error", "Failed to update user profile", "INTERNAL_SERVER_ERROR")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(profile)
+}
+
+

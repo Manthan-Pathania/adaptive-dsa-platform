@@ -17,6 +17,7 @@ type InMemoryRepository struct {
 	passwords    map[uuid.UUID]string
 	sessions     map[string]*Session
 	auditLogs    []*AuditLog
+	profiles     map[uuid.UUID]*UserProfile
 }
 
 // NewInMemoryRepository instantiates an in-memory repository.
@@ -27,6 +28,7 @@ func NewInMemoryRepository() *InMemoryRepository {
 		passwords:    make(map[uuid.UUID]string),
 		sessions:     make(map[string]*Session),
 		auditLogs:    make([]*AuditLog, 0),
+		profiles:     make(map[uuid.UUID]*UserProfile),
 	}
 }
 
@@ -201,6 +203,11 @@ func (m *InMemoryRepository) ExecTx(ctx context.Context, fn func(repo Repository
 	}
 	snapshotAuditLogs := make([]*AuditLog, len(m.auditLogs))
 	copy(snapshotAuditLogs, m.auditLogs)
+	snapshotProfiles := make(map[uuid.UUID]*UserProfile)
+	for k, v := range m.profiles {
+		p := *v
+		snapshotProfiles[k] = &p
+	}
 	m.mu.Unlock()
 
 	err := fn(m)
@@ -211,8 +218,41 @@ func (m *InMemoryRepository) ExecTx(ctx context.Context, fn func(repo Repository
 		m.passwords = snapshotPasswords
 		m.sessions = snapshotSessions
 		m.auditLogs = snapshotAuditLogs
+		m.profiles = snapshotProfiles
 		m.mu.Unlock()
 		return err
 	}
 	return nil
 }
+
+func (m *InMemoryRepository) GetUserProfile(ctx context.Context, userID uuid.UUID) (*UserProfile, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	p, exists := m.profiles[userID]
+	if !exists {
+		return nil, ErrProfileNotFound
+	}
+	cp := *p
+	return &cp, nil
+}
+
+func (m *InMemoryRepository) UpsertUserProfile(ctx context.Context, profile *UserProfile) (*UserProfile, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().UTC()
+	cp := *profile
+	if cp.CreatedAt.IsZero() {
+		if existing, ok := m.profiles[cp.UserID]; ok {
+			cp.CreatedAt = existing.CreatedAt
+		} else {
+			cp.CreatedAt = now
+		}
+	}
+	cp.UpdatedAt = now
+	m.profiles[cp.UserID] = &cp
+	res := cp
+	return &res, nil
+}
+

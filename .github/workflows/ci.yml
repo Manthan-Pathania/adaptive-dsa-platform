@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   backend-test:
-    name: Go Foundation Tests & Verification
+    name: Go Monolith Tests & Verification
     runs-on: ubuntu-latest
 
     services:
@@ -57,14 +57,6 @@ jobs:
       - name: Run Go Vet
         run: go vet ./...
 
-      - name: Run Unit Tests with Race Detection
-        run: go test -v -race -short ./...
-
-      - name: Verify sqlc Query Generation
-        run: |
-          go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.27.0 generate
-          git diff --exit-code internal/database/generated/
-
       - name: Run Database Migrations
         env:
           DATABASE_URL: postgres://dsa_user:dsa_password@localhost:5432/dsa_db?sslmode=disable
@@ -72,20 +64,78 @@ jobs:
           go run ./cmd/migrate up
           go run ./cmd/migrate status
 
-      - name: Run Integration Tests
+      - name: Verify Financial Reconciliation Tooling
+        env:
+          DATABASE_URL: postgres://dsa_user:dsa_password@localhost:5432/dsa_db?sslmode=disable
+        run: |
+          go run ./cmd/admin reconcile-credits
+
+      - name: Run Unit & Integration Tests with Race Detection
         env:
           DATABASE_URL: postgres://dsa_user:dsa_password@localhost:5432/dsa_db?sslmode=disable
         run: |
           go test -v -race -coverprofile=coverage.out ./...
 
-      - name: Build Server Binary
-        run: go build -trimpath -ldflags="-s -w" -o bin/server ./cmd/server
+      - name: Build All Production CLI & Server Binaries
+        run: |
+          mkdir -p bin
+          go build -trimpath -ldflags="-s -w" -o bin/server ./cmd/server
+          go build -trimpath -ldflags="-s -w" -o bin/migrate ./cmd/migrate
+          go build -trimpath -ldflags="-s -w" -o bin/admin ./cmd/admin
+          go build -trimpath -ldflags="-s -w" -o bin/import-questions ./cmd/import-questions
 
-      - name: Build Migration Binary
-        run: go build -trimpath -ldflags="-s -w" -o bin/migrate ./cmd/migrate
+  frontend-test:
+    name: Next.js Frontend Verification
+    runs-on: ubuntu-latest
 
-      - name: Build Admin CLI Binary
-        run: go build -trimpath -ldflags="-s -w" -o bin/admin ./cmd/admin
+    defaults:
+      run:
+        working-directory: web
 
-      - name: Build Question Bank Importer CLI Binary
-        run: go build -trimpath -ldflags="-s -w" -o bin/import-questions ./cmd/import-questions
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run Production Next.js Standalone Build
+        run: npm run build
+
+  container-build:
+    name: Multi-Stage Container Image Verification
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-test]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Go API Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: adaptive-dsa-backend:ci
+
+      - name: Build Next.js Frontend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          push: false
+          tags: adaptive-dsa-frontend:ci

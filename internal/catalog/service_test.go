@@ -136,3 +136,60 @@ func TestNormalizeExternalURL(t *testing.T) {
 		}
 	}
 }
+
+func TestService_AdminOperations(t *testing.T) {
+	repo := NewInMemoryRepository()
+	svc := NewService(repo)
+	ctx := context.Background()
+
+	// 1. Create Question
+	created, err := svc.CreateQuestion(ctx, CreateQuestionParams{
+		Title:      "Reverse Linked List",
+		Difficulty: DifficultyEasy,
+		IsCore:     true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Reverse Linked List", created.Title)
+	assert.True(t, created.IsActive)
+	assert.Equal(t, "https://leetcode.com/problems/reverse-linked-list", created.ExternalURL)
+
+	// 2. Update Question
+	newTitle := "Reverse Linked List (Iterative & Recursive)"
+	updated, err := svc.UpdateQuestion(ctx, created.ID, UpdateQuestionParams{
+		Title:      newTitle,
+		Difficulty: DifficultyMedium,
+		IsCore:     false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, newTitle, updated.Title)
+	assert.Equal(t, DifficultyMedium, updated.Difficulty)
+
+	// 3. Archive Question
+	err = svc.SetQuestionActive(ctx, created.ID, false)
+	require.NoError(t, err)
+
+	archivedQ, err := svc.GetQuestion(ctx, created.ID.String())
+	require.NoError(t, err)
+	assert.False(t, archivedQ.IsActive)
+
+	// Candidate list should NOT see archived question
+	activeOnly := true
+	candList, total, err := svc.ListQuestions(ctx, ListQuestionsFilter{IsActive: &activeOnly})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+	assert.Empty(t, candList)
+
+	// Admin list (nil filter) DOES see archived question
+	adminList, totalAdmin, err := svc.ListQuestions(ctx, ListQuestionsFilter{IsActive: nil})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), totalAdmin)
+	assert.Equal(t, 1, len(adminList))
+
+	// 4. Restore Question
+	err = svc.SetQuestionActive(ctx, created.ID, true)
+	require.NoError(t, err)
+	candListRestored, totalRestored, err := svc.ListQuestions(ctx, ListQuestionsFilter{IsActive: &activeOnly})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), totalRestored)
+	assert.Equal(t, 1, len(candListRestored))
+}

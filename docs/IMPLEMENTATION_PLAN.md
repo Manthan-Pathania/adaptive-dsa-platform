@@ -106,69 +106,101 @@ graph TD
 ---
 
 ### Phase 4: User Experience, Daily Dashboard & AI Credits
-*Objective*: Build the responsive Next.js frontend, daily preparation dashboard, attempt logging modal, revision queue, Gemini AI tutor integration, and double-entry credit ledger.
+*Objective*: Build the daily preparation dashboard engine, AI tutoring provider, progressive hint ladder, append-only immutable credit ledger, adaptive recommendation system, and complete Next.js user-facing experience.
 - **Tasks**:
-  1. Initialize Next.js 14+ (App Router) project with TypeScript, Tailwind CSS, and shadcn/ui components.
-  2. Implement authentication flow in frontend (Login, Register, Session context, Protected routes).
-  3. Build Daily Dashboard: Today's focus, due revisions, weak pattern indicators, streak metrics.
-  4. Build Question Catalog view with pattern filtering, search, and difficulty tags.
-  5. Build Attempt Logging Modal: Outcome selection, timer, mistake taxonomy checkboxes, notes.
-  6. Implement AI Provider abstraction and Google Gemini client (`internal/ai`).
-  7. Implement Progressive Hint Ladder component (Level 1 Nudge to Level 4 Pseudocode).
-  8. Implement double-entry credit ledger (`credit_ledger_entries`, `credit_accounts`) with row-level locking (`SELECT ... FOR UPDATE`).
-  9. Implement Admin Panel: User lookup, catalog management, manual promotional credit grants with audit logs.
-- **Learning Highlights**:
-  - Avoiding frontend state duplication: Backend remains the single source of truth for business rules.
-  - Safe prompt engineering and injection defense using XML delimiter isolation.
-  - Implementing double-entry accounting in PostgreSQL to ensure financial consistency under concurrency.
+  - [x] Implement deterministic Adaptive Preparation Engine (`internal/adaptive`) prioritizing due SM-2 revisions, weak pattern reinforcement, and roadmap milestones.
+  - [x] Implement AI Provider abstraction and Google Gemini REST client (`internal/ai`) with prompt injection protection (XML delimiters).
+  - [x] Implement Progressive Hint Ladder (Level 1 Nudge to Level 4 Pseudocode), Approach Review, and Concept Explanation.
+  - [x] Implement append-only immutable credit ledger (`credit_ledger_entries`, `credit_accounts`) with row-level locking (`SELECT ... FOR UPDATE`), zero-charge failure guarantee, refunds, and reconciliation verification.
+  - [x] Implement Admin promotional credit grants (`POST /api/v1/admin/users/{id}/credits`) with audit logs.
+  - [x] Implement HTTP API endpoints for adaptive dashboard, weak patterns, AI hints, approach reviews, and credit balances.
+  - [x] Complete Next.js 16+ frontend application (`web/`) with TypeScript, Tailwind CSS, lucide-react, session cookies, and CSRF double-submit protection.
+  - [x] Implement user-facing pages:
+    - Daily Preparation Dashboard (`/dashboard`) with adaptive priority queue, SM-2 retention stats, weak pattern diagnostics, and recent attempt history.
+    - Question Catalog (`/questions`) with search, difficulty filtering, and pattern tags.
+    - Practice Workspace (`/questions/[id]`) with live interview timer, 4-tier progressive hint ladder, code approach review, concept Q&A, and full attempt logging modal (outcome, perceived difficulty, quality stars, mistake taxonomy).
+    - Spaced Repetition Due Queue (`/revisions`) with overdue indicators, stability metrics, and instant solve links.
+    - Credit Ledger & History (`/credits`) with available balance card, zero-charge guarantee badge, and immutable transaction ledger table.
+    - System Administration (`/admin`) for promotional credit grants and runtime audit verification.
+    - Authentication (`/login`, `/register`, `/`) with promotional bonus callout and secure CSRF-protected forms (zero invented demo credentials).
+  - [x] Run comprehensive automated verification: frontend production build, ESLint, TypeScript check, unit tests, and real PostgreSQL 16 integration tests across all 13 Go packages.
 - **Milestone Acceptance Criteria**:
-  - User can register, log in, view their daily study plan, and log a question attempt via the browser UI.
-  - Requesting an AI hint checks balance, displays estimated credit cost, reserves credits, calls Gemini, and deducts credits atomically.
-  - Simulated Gemini timeout or failure leaves user credit balance untouched (0 charge).
-  - Admin can grant promotional credits with a documented reason, producing an immutable ledger record and audit log.
+  - [x] Requesting an AI hint checks balance, reserves credits, calls Gemini, and deducts credits atomically.
+  - [x] Simulated Gemini timeout or failure leaves user credit balance untouched (0 charge).
+  - [x] Admin can grant promotional credits with a documented reason, producing an immutable ledger record and audit log.
+  - [x] Adaptive preparation engine deterministically ranks due SM-2 revisions ahead of weak patterns and roadmap steps.
+  - [x] Full Next.js frontend builds without errors and connects to all Go backend APIs.
+- **Status**: Phase 4 Complete & Live Gemini Verified (Frontend + Backend + AI Engine + Real PostgreSQL 16 + Live Gemini API Verified). Ready for User Review. Stopped before Phase 5.
 
 ---
 
 ### Phase 5: Payments & Background Worker
 *Objective*: Implement Razorpay test-mode payment gateway integration, checkout flow, HMAC signature verification, idempotent webhook handling, and atomic credit delivery.
 - **Tasks**:
-  1. Implement server-side Razorpay order creation (`POST /api/v1/payments/orders`).
-  2. Implement Razorpay test-mode checkout integration in the Next.js frontend.
-  3. Implement webhook handler (`POST /api/v1/payments/webhook`) with HMAC-SHA256 signature verification.
-  4. Implement webhook idempotency using `payment_webhook_events` table to prevent duplicate crediting.
-  5. Execute payment fulfillment in an atomic PostgreSQL transaction: Mark order `PAID`, record transaction, insert credit ledger entry, and update cached balance.
-  6. Setup Redis-backed background worker (`asynq` or simple worker pool) for asynchronous email notifications and nightly reconciliation tasks.
-  7. Implement nightly ledger reconciliation check (`SUM(ledger) == cached_balance`).
+  - [x] Payment provider abstraction (`PaymentProvider` interface) decoupling Razorpay-specific API logic from application domain.
+  - [x] Server-side credit packages and pricing configuration in integer INR paise (`pkg_starter`: 50 cr / ₹99, `pkg_pro`: 150 cr / ₹249, `pkg_master`: 400 cr / ₹599).
+  - [x] Server-side payment order creation (`POST /api/v1/payments/orders`) enforcing server prices; rejects client-supplied amounts or credit quantities.
+  - [x] Razorpay Checkout integration in Next.js frontend with dynamic script loader, interactive tier cards, pending/verifying/success/failure states, and live credit balance reconciliation.
+  - [x] Client checkout signature verification endpoint (`POST /api/v1/payments/verify`) using HMAC-SHA256 with constant-time equality check (`crypto/subtle.ConstantTimeCompare`).
+  - [x] Razorpay webhook endpoint (`POST /api/v1/payments/webhook`) verifying `X-Razorpay-Signature` against raw body with constant-time comparison.
+  - [x] Webhook event deduplication and replay protection via `payment_webhook_events` table (`event_id UNIQUE`).
+  - [x] Atomic credit delivery in a single PostgreSQL transaction: row lock (`SELECT ... FOR UPDATE`), status transition to `PAID`, immutable `credit_ledger` entry with `ReferenceType: "RAZORPAY_PAYMENT"`, and materialized balance update.
+  - [x] Reversible Goose database migration `migrations/00005_payments_and_webhooks.sql` adding `payment_orders`, `payment_webhook_events`, and `background_jobs`.
+  - [x] Durable PostgreSQL-backed background worker (`Worker`) with `FOR UPDATE SKIP LOCKED` batch polling, exponential backoff, and bounded retry limits.
+  - [x] User payment history endpoint (`GET /api/v1/payments/history`) and admin payment audit listing (`GET /api/v1/admin/payments`) with existing RBAC enforcement.
+  - [x] Comprehensive automated test suite: PostgreSQL 16 integration tests for concurrent checkout/webhook delivery, duplicate deliveries, worker bounded retries, and ledger reconciliation; server API unit and integration tests.
 - **Learning Highlights**:
-  - Why client-side payment callbacks must never be trusted.
-  - Idempotent webhook processing in high-concurrency environments.
-  - Designing financial reconciliation audits in backend software.
+  - Why client-side payment callbacks must never be trusted for granting value.
+  - Idempotent webhook processing in high-concurrency environments using database constraints and row locking.
+  - Double-entry ledger balance reconciliation audits (`SUM(ledger) == cached_balance`).
 - **Milestone Acceptance Criteria**:
-  - Valid Razorpay webhook results in order marked `PAID` and exact credit amount added to ledger.
-  - Invalid signature returns HTTP 400 with zero database changes.
-  - Sending the identical webhook payload 3 times results in HTTP 200 responses with exactly **one** credit grant entry in `credit_ledger_entries`.
-  - Concurrent webhook requests do not produce race conditions.
+  - [x] Valid Razorpay webhook results in order marked `PAID` and exact credit amount added to ledger.
+  - [x] Invalid signature returns HTTP 400 with zero database changes.
+  - [x] Sending the identical webhook payload 10 times concurrently results in exactly **one** credit grant entry in `credit_ledger`.
+  - [x] Concurrent checkout verification and webhook delivery against the same payment order do not produce race conditions or duplicate credits.
+  - [x] Full Next.js frontend builds without errors and connects to all payments Go backend APIs.
+- **Status**: Phase 5 Complete & Audited (Backend + Real PostgreSQL 16 Concurrency Verified + Frontend Next.js Production Build + Webhook Idempotency + Durable Worker). Ready for User Review. Stopped before Phase 6.
 
 ---
 
 ### Phase 6: Hardening, Observability & VPS Deployment
-*Objective*: Execute end-to-end integration testing, security audit, database backup/restore verification, Terraform provisioning, and live deployment on a modest VPS.
+*Objective*: Execute end-to-end integration testing, security audit, database backup/restore verification, containerization, and prepare for controlled release review.
 - **Tasks**:
-  1. Implement automated Playwright end-to-end test suite for critical candidate workflows.
-  2. Execute security hardening: CORS audit, Content Security Policy (CSP), rate limit tuning, dependency vulnerability scan (`govulncheck`, `npm audit`).
-  3. Implement automated database backup script (`pg_dump` $\rightarrow$ `zstd` $\rightarrow$ `age` encryption $\rightarrow$ offsite S3 upload).
-  4. Write and verify automated disaster recovery restore script on a clean container.
-  5. Create Terraform module for provisioning a low-cost VPS (Hetzner / DigitalOcean), DNS records, and cloud firewall.
-  6. Configure Caddy reverse proxy with automatic Let's Encrypt TLS.
-  7. Deploy application stack via Docker Compose with systemd auto-restart.
-  8. Perform smoke testing against live VPS deployment in test mode.
-- **Learning Highlights**:
-  - End-to-end testing of full-stack web applications.
-  - Zero-cost automated database encryption and offsite cold storage.
-  - Production infrastructure automation with Terraform and Caddy.
+  - [x] Multi-stage non-root Dockerfile for Go API monolith (`Dockerfile`) building statically stripped binaries (`server`, `migrate`, `admin`, `import-questions`) running under `appuser:10001`.
+  - [x] Multi-stage standalone Dockerfile for Next.js frontend (`web/Dockerfile`) with `output: "standalone"` running under `nextjs:1001`.
+  - [x] Production Docker Compose configuration (`docker-compose.yml`) with internal-only private PostgreSQL network, resource limits, healthchecks, and Caddy reverse proxy (`Caddyfile`).
+  - [x] Dedicated local evaluation compose stack (`docker-compose.local.yml`) allowing single-command local testing with zero external credential dependencies.
+  - [x] Security hardening: Security headers middleware (HSTS, CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy), `http.MaxBytesReader` body limits, CORS whitelist enforcement, and production startup config validation.
+  - [x] PostgreSQL role separation and append-only hardening (`scripts/setup_production_roles.sql`) with migrator DDL account vs unprivileged application DML account, revoking `UPDATE` and `DELETE` on ledger and audit tables.
+  - [x] Automated compressed database backup and restore scripts (`scripts/backup_postgres.sh`, `scripts/restore_postgres.sh`) with SHA-256 verification and 7-day retention.
+  - [x] Live PostgreSQL 16 restore test executed and verified (compressed dump, created clean disposable DB, restored 23/23 tables and migrations, verified schema, dropped clean DB).
+  - [x] Operational diagnostics & metrics endpoint (`GET /api/v1/admin/metrics`) protected by Admin RBAC reporting runtime, DB pool, and background worker queue metrics.
+  - [x] Double-entry credit ledger balance reconciliation CLI tool (`go run ./cmd/admin reconcile-credits`) and operational runbooks (`docs/runbooks/OPERATIONS.md`).
+  - [x] Razorpay test-mode guide (`docs/PAYMENTS_TEST_MODE_GUIDE.md`) detailing local webhook tunneling, test cards, and failure flows.
+  - [x] GitHub Actions CI/CD workflows: `.github/workflows/ci.yml` (Go tests with race detection against PostgreSQL 16, Next.js lint/build, Docker container build verification) and `.github/workflows/deploy.yml` (manual dispatch with approval gates).
 - **Milestone Acceptance Criteria**:
-  - Full Playwright E2E suite passes in CI.
-  - Automated restore test successfully reconstructs database from encrypted backup and asserts table counts.
-  - Application runs on VPS under HTTPS with valid TLS certificate.
-  - Health check endpoints (`/healthz`, `/readyz`) respond in < 10ms.
-  - All test credentials remain safely isolated; zero live payment credentials enabled.
+  - [x] All Go unit and PostgreSQL integration tests pass with race detection.
+  - [x] Next.js frontend builds without errors in standalone production mode.
+  - [x] Automated restore test successfully reconstructs database from backup and asserts all 23 table counts and goose migrations.
+  - [x] Health check endpoints (`/healthz`, `/readyz`) and administrative metrics (`/api/v1/admin/metrics`) operational.
+  - [x] All test credentials remain safely isolated; zero live payment credentials enabled.
+  - [x] Local Docker Compose execution verified with step-by-step user evaluation guide.
+- **Status**: Phase 6 Complete & Hardened.
+
+---
+
+### Release 1: Product Completion & Full Workflow Audit
+*Objective*: Transform all completed foundational phases into a cohesive, fully connected, production-quality Release 1 product with all 20 specification areas verified.
+- **Tasks**:
+  - [x] **Frontend Reverse Proxy & Cookie Delivery**: Next.js route handler proxying `/api/v1/*` to `http://backend:8080` preserving both `session_token` and `csrf_token` via `getSetCookie()`.
+  - [x] **Welcome Credit Grant**: Atomic 50 promotional credit grant on user registration and balance retrieval into signed double-entry ledger.
+  - [x] **Onboarding Flow & Persistence**: Migration 00007 (`user_profiles`), interactive 6-step wizard at `/onboarding` with goals, timeline, and company preferences.
+  - [x] **Curated & Company Roadmaps**: 5 seeded roadmaps in PostgreSQL (Master 29 Patterns, Blind 75, Google, Meta, Amazon) with canonical question identity across tracks.
+  - [x] **Practice Workspace & Attempts**: Practice timer, outcome tracking (`SOLVED_INDEPENDENTLY`, `HINTS_USED`, `EDITORIAL_USED`, `FAILED`), notes, mistake tags, and code snippets at `/questions/[id]`.
+  - [x] **SM-2 Spaced Repetition**: Next review scheduling, interval days, and ease factor calculations surfaced in `/revisions`.
+  - [x] **AI Tutor & Authoritative Pricing**: 4-level progressive hint ladder, approach review, concept explanation, 0 charge on failures, and offline mock support (`USE_MOCK_AI=true`).
+  - [x] **Razorpay Mock Payment Checkout**: Starter (50cr / ₹99), Pro (150cr / ₹249), Master (400cr / ₹599) packages with authoritative server-side pricing and idempotent fulfillment.
+  - [x] **Data Portability**: JSON export of candidate attempts, progress, and SM-2 schedules (`GET /api/v1/user/export`) via `/dashboard`.
+  - [x] **Code Quality & Automated Verification**: 0 ESLint errors/warnings, Next.js production build clean, Go unit and integration test suite passing (0 failures), automated 10-gate E2E journey test verified.
+- **Status**: Release 1 Complete, Fully Connected, Audited, and Verified Locally.
+

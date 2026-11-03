@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+web
+bin
+docs
+*.exe
+tmp
+.vscode
+.idea
+*.log

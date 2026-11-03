@@ -24,16 +24,27 @@ type Config struct {
 	Log      LogConfig
 	Session  SessionConfig
 	Auth     AuthConfig
+	AI       AIConfig
+	Payments PaymentsConfig
 }
 
-// ServerConfig defines HTTP server transport and timeout settings.
+// PaymentsConfig holds Razorpay test-mode API credentials and webhook verification secrets.
+type PaymentsConfig struct {
+	RazorpayKeyID         string `env:"RAZORPAY_KEY_ID" envDefault:"rzp_test_placeholder_key_id"`
+	RazorpayKeySecret     string `env:"RAZORPAY_KEY_SECRET" envDefault:"rzp_test_placeholder_key_secret"`
+	RazorpayWebhookSecret string `env:"RAZORPAY_WEBHOOK_SECRET" envDefault:"rzp_test_placeholder_webhook_secret"`
+}
+
+// ServerConfig defines HTTP server transport, security and timeout settings.
 type ServerConfig struct {
-	Host            string        `env:"SERVER_HOST" envDefault:"0.0.0.0"`
-	Port            int           `env:"SERVER_PORT" envDefault:"8080"`
-	ReadTimeout     time.Duration `env:"SERVER_READ_TIMEOUT" envDefault:"5s"`
-	WriteTimeout    time.Duration `env:"SERVER_WRITE_TIMEOUT" envDefault:"10s"`
-	IdleTimeout     time.Duration `env:"SERVER_IDLE_TIMEOUT" envDefault:"120s"`
-	ShutdownTimeout time.Duration `env:"SERVER_SHUTDOWN_TIMEOUT" envDefault:"10s"`
+	Host               string        `env:"SERVER_HOST" envDefault:"0.0.0.0"`
+	Port               int           `env:"SERVER_PORT" envDefault:"8080"`
+	ReadTimeout        time.Duration `env:"SERVER_READ_TIMEOUT" envDefault:"5s"`
+	WriteTimeout       time.Duration `env:"SERVER_WRITE_TIMEOUT" envDefault:"10s"`
+	IdleTimeout        time.Duration `env:"SERVER_IDLE_TIMEOUT" envDefault:"120s"`
+	ShutdownTimeout    time.Duration `env:"SERVER_SHUTDOWN_TIMEOUT" envDefault:"10s"`
+	CORSAllowedOrigins string        `env:"CORS_ALLOWED_ORIGINS" envDefault:"http://localhost:3000,http://127.0.0.1:3000"`
+	MaxBodyBytes       int64         `env:"SERVER_MAX_BODY_BYTES" envDefault:"1048576"` // 1MB default
 }
 
 // DatabaseConfig defines PostgreSQL connection pooling parameters.
@@ -65,6 +76,15 @@ type SessionConfig struct {
 type AuthConfig struct {
 	CSRFSecret       string `env:"CSRF_SECRET" envDefault:"super-secret-csrf-key-min-32-bytes!"`
 	RateLimitAuthRPM int    `env:"AUTH_RATE_LIMIT_RPM" envDefault:"15"`
+}
+
+// AIConfig defines Google Gemini AI tutor and credit allocation parameters.
+type AIConfig struct {
+	GeminiAPIKey   string        `env:"GEMINI_API_KEY" envDefault:""`
+	GeminiModel    string        `env:"GEMINI_MODEL" envDefault:"gemini-3.8-flash"`
+	GeminiTimeout  time.Duration `env:"GEMINI_TIMEOUT" envDefault:"15s"`
+	GeminiRPM      int           `env:"GEMINI_RPM" envDefault:"15"`
+	WelcomeCredits int32         `env:"WELCOME_CREDITS" envDefault:"50"`
 }
 
 // Load parses environment variables and validates configuration.
@@ -143,8 +163,19 @@ func (c *Config) Validate() error {
 	if c.Session.CookieExpiry <= 0 {
 		return fmt.Errorf("SESSION_COOKIE_EXPIRY must be positive, got %s", c.Session.CookieExpiry)
 	}
-	if c.AppEnv == EnvProduction && !c.Session.CookieSecure {
-		return fmt.Errorf("SESSION_COOKIE_SECURE must be true in production")
+	if c.AppEnv == EnvProduction {
+		if !c.Session.CookieSecure {
+			return fmt.Errorf("SESSION_COOKIE_SECURE must be true in production")
+		}
+		if c.Log.Format != "json" {
+			return fmt.Errorf("LOG_FORMAT must be json in production, got '%s'", c.Log.Format)
+		}
+		if c.Auth.CSRFSecret == "super-secret-csrf-key-min-32-bytes!" || strings.Contains(strings.ToLower(c.Auth.CSRFSecret), "placeholder") {
+			return fmt.Errorf("insecure default or placeholder CSRF_SECRET is not permitted in production")
+		}
+		if strings.Contains(c.Server.CORSAllowedOrigins, "*") {
+			return fmt.Errorf("wildcard CORS origins are strictly forbidden in production")
+		}
 	}
 
 	// Auth & CSRF validation
@@ -155,7 +186,31 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("CSRF_SECRET must be at least 32 characters, got %d", len(c.Auth.CSRFSecret))
 	}
 
+	// AI validation
+	if c.AI.GeminiTimeout <= 0 {
+		return fmt.Errorf("GEMINI_TIMEOUT must be positive, got %s", c.AI.GeminiTimeout)
+	}
+	if c.AI.GeminiRPM <= 0 {
+		return fmt.Errorf("GEMINI_RPM must be positive, got %d", c.AI.GeminiRPM)
+	}
+	if c.AI.WelcomeCredits < 0 {
+		return fmt.Errorf("WELCOME_CREDITS must be non-negative, got %d", c.AI.WelcomeCredits)
+	}
+
 	return nil
+}
+
+// AllowedOriginsList returns parsed slice of allowed CORS origins.
+func (s *ServerConfig) AllowedOriginsList() []string {
+	parts := strings.Split(s.CORSAllowedOrigins, ",")
+	var result []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 // RedactedDatabaseURL returns the connection URL with sensitive credentials masked.

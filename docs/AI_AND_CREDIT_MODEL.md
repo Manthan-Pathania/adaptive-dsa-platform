@@ -125,7 +125,7 @@ Provide a Level {{.Level}} hint. Keep it concise (under 120 words), pedagogical,
 
 ---
 
-## 4. Double-Entry Credit Accounting & Ledger Design
+## 4. Append-Only Immutable Credit Ledger & Accounting Model
 
 ### 4.1. Core Accounting Invariants
 1. **Integer Representation**: All credit values are positive or negative integers. No floating-point math.

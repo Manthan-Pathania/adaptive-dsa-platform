@@ -285,3 +285,48 @@ func TestService_ConcurrentAttempts_NoLostUpdates(t *testing.T) {
 	require.NotNil(t, schedule)
 	assert.GreaterOrEqual(t, schedule.RepetitionCount, int32(1))
 }
+
+func TestService_ExportUserData(t *testing.T) {
+	repo := NewInMemoryRepository()
+	svc := NewService(repo)
+
+	userID := uuid.New()
+	q1 := uuid.New()
+	q2 := uuid.New()
+	ctx := context.Background()
+
+	// Record an attempt for q1
+	_, _, _, err := svc.RecordAttempt(ctx, RecordAttemptRequest{
+		UserID:                userID,
+		QuestionID:            q1,
+		Outcome:               OutcomeSolvedIndependently,
+		TimeSpentSecs:         1200,
+		DifficultyExperienced: PerceivedJustRight,
+		QualityRating:         4,
+		MistakeTags:           []string{"off_by_one"},
+	})
+	require.NoError(t, err)
+
+	// Record an attempt for q2
+	_, _, _, err = svc.RecordAttempt(ctx, RecordAttemptRequest{
+		UserID:                userID,
+		QuestionID:            q2,
+		Outcome:               OutcomeSolvedWithHints,
+		TimeSpentSecs:         1800,
+		DifficultyExperienced: PerceivedChallenging,
+		QualityRating:         3,
+		MistakeTags:           []string{"edge_case"},
+	})
+	require.NoError(t, err)
+
+	// Export
+	export, err := svc.ExportUserData(ctx, userID)
+	require.NoError(t, err)
+	require.NotNil(t, export)
+	assert.Equal(t, userID, export.UserID)
+	assert.Equal(t, 2, len(export.Attempts))
+	assert.Equal(t, 2, len(export.Progress))
+	assert.Equal(t, 2, len(export.Revisions))
+	assert.False(t, export.ExportedAt.IsZero())
+}
+

@@ -198,3 +198,23 @@ func CalculateSM2(currentReps int32, currentEF float64, currentInterval int32, q
 		NextReviewAt:    nextReview,
 	}
 }
+
+// UserExportData packages candidate learning history for portable export.
+type UserExportData struct {
+	UserID     uuid.UUID              `json:"user_id"`
+	Progress   []UserQuestionProgress `json:"progress"`
+	Attempts   []QuestionAttempt      `json:"attempts"`
+	Revisions  []RevisionSchedule     `json:"revisions"`
+	ExportedAt time.Time              `json:"exported_at"`
+}
+
+type QuickMarkRequest struct {
+	UserID                uuid.UUID           `json:"user_id"`
+	QuestionID            uuid.UUID           `json:"question_id"`
+	Outcome               AttemptOutcome      `json:"outcome"`
+	DifficultyExperienced PerceivedDifficulty `json:"difficulty_experienced"`
+	NeedsRevision         bool                `json:"needs_revision"`
+	ConfidenceFirstTry    bool                `json:"confidence_first_try"`
+	Notes                 string              `json:"notes"`
+}
+

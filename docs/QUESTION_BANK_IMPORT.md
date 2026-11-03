@@ -1,150 +1,148 @@
-# Question Bank Import Specification — Adaptive DSA Interview Preparation Platform
+# Master Question Bank Import & Admin Catalog Management
 
-## 1. Status & Unresolved Inputs
+## 1. Overview & Source of Truth
 
-The curated master DSA question bank (approximately 600–700 questions) currently resides in an external Excel spreadsheet (`.xlsx` or `.csv`).
+The authoritative master DSA question bank is sourced from the user's master workbook:
 
-> [!IMPORTANT]
-> **Workspace Status**: As of Phase 0, the spreadsheet file is **not yet present in the workspace repository**.
-> In accordance with project instructions, the platform will **not** fabricate, scrape, or mock a replacement question bank. The exact spreadsheet structure remains an **unresolved input** until the user places the file into the workspace for inspection.
+- **Host Path**: `F:\DSA\FAANG_DSA_Master_Plan_v2.xlsx`
+- **Format**: Microsoft Excel OpenXML (`.xlsx`)
+- **Primary Sheet**: `Master Plan`
+- **Total Problem Rows**: 621
+- **Curated Patterns**: 29 algorithmic patterns
+- **Unique Questions**: 542 (539 imported + 3 initial seed)
+- **Cross-Listed Associations**: 82 problem-pattern links (problems cross-listed across multiple patterns)
 
-This document establishes the architecture, validation rules, duplicate detection mechanisms, and execution strategy for importing this dataset during **Phase 3**.
-
----
-
-## 2. Importer Delivery Vehicle: CLI Tool vs. Admin Panel
-
-### Recommended Strategy: Phase 3 CLI Script $\rightarrow$ Phase 4 Admin UI
-We recommend implementing the initial importer as a **dedicated Go CLI command** (`cmd/import-questions/main.go`) during Phase 3, followed by an Admin Panel web interface in Phase 4.
-
-| Dimension | CLI Tool (`cmd/import-questions`) | Admin Panel Web Upload UI |
-| :--- | :--- | :--- |
-| **Safety & Control** | **Superior**: Can be run with `--dry-run`, logs streaming progress to terminal, allows interactive confirmation before committing. | Subject to HTTP timeouts (e.g., 30s Caddy proxy timeout on 700 rows) and file upload size limits. |
-| **Development Speed** | **Fast**: Implemented in pure Go with zero frontend overhead, unblocking Phase 3 core feature development immediately. | Requires multipart file upload forms, upload progress bars, and complex web error tables. |
-| **Reusability** | The core parser and validator are encapsulated in `internal/catalog/importer`, allowing the Admin Panel in Phase 4 to import the exact same package without duplicating logic. | Same core logic, but delayed until frontend is built. |
+All questions are stored in PostgreSQL (`questions`, `patterns`, `topics`, `question_patterns`, `question_import_history`). Questions are **never hardcoded** into application source code.
 
 ---
 
-## 3. Spreadsheet Inspection Checklist
+## 2. Workbook Structure & Database Mapping
 
-When the user copies the Excel file into the workspace, the following structural characteristics must be verified before running the importer:
+### Column Mapping Matrix
 
-1. **File Format & Sheets**:
-   - Single sheet vs. multiple sheets (e.g., one sheet per pattern or a unified master sheet).
-   - Exact sheet name(s).
-2. **Header Row Identification**:
-   - Row number of the header (usually Row 1, but sometimes preceded by title or instructions in Rows 1–2).
-3. **Column Name Mapping**:
-   - Expected candidate columns:
-     - *Problem Title* (e.g., "Two Sum", "3Sum", "Trapping Rain Water")
-     - *Problem Link / URL* (e.g., `https://leetcode.com/problems/two-sum/`)
-     - *Difficulty* (e.g., "Easy", "Medium", "Hard" or numeric 1–3)
-     - *Primary Pattern* (e.g., "Two Pointers", "Sliding Window", "Dynamic Programming")
-     - *Subpattern / Variation* (e.g., "Opposite Direction", "Fast & Slow", "Prefix Sum")
-     - *Core vs. Reinforcement* (e.g., "Core", "Optional", "Must Do", "Bonus")
-     - *Target Companies / Tags* (e.g., "Google, Meta", "Amazon", etc.)
-     - *Prerequisites* (e.g., "Two Sum", "Binary Search")
-     - *Editorial Notes / Hints* (Short explanation of the core trick)
-4. **Cell Delimiter & Format Conventions**:
-   - How multiple companies or multiple tags are separated (e.g., comma `,`, semicolon `;`, or newline `\n`).
-   - Consistency of external URLs (clean URLs vs URLs with tracking query parameters).
+| Workbook Column Header | Inferred Field | PostgreSQL Target | Description / Transform |
+| :--- | :--- | :--- | :--- |
+| `Problem` | Title | `questions.title` | Full title of the algorithmic problem. |
+| *(Synthesized)* | Slug | `questions.slug` | URL-safe lowercased slug (`two-sum`). |
+| *(Synthesized)* | External URL | `questions.external_url` | Canonical URL: `https://leetcode.com/problems/<slug>/`. Unique index key for idempotency. |
+| `Difficulty` | Difficulty | `questions.difficulty` | Enum: `EASY`, `MEDIUM`, `HARD` (case-insensitive parsed). |
+| `LeetCode ID` | External ID | `questions.leetcode_id` | Alphanumeric LeetCode identifier (e.g. `1`, `283`, `GFG`). |
+| `Pattern` | Primary Pattern | `patterns.name` & `question_patterns` | Algorithmic pattern name. Linked with `is_primary = TRUE` on first occurrence. |
+| `Pattern` | Topic Name | `topics.name` | Pattern category name in the curriculum. |
+| `Subpattern` | Subpattern | `patterns.name` & `question_patterns` | Fine-grained classification (linked with `is_primary = FALSE`). |
+| `Notes` | Editorial Guidance | `questions.editorial_summary` | Algorithmic summary or corner-case guidance. |
+| *(Migration 00006)* | Active Status | `questions.is_active` | Boolean flag. `TRUE` = visible to candidates; `FALSE` = archived. Default `TRUE`. |
+
+### Handling Cross-Listed Questions
+79 questions in the master workbook appear in multiple rows because they belong to multiple algorithmic patterns (e.g., *Move Zeroes* appears under both *Arrays & Hashing* and *Two Pointers*).
+- **Rule**: When a question's `external_url` has already been encountered in the import, subsequent occurrences link the additional pattern in `question_patterns` (`is_primary = FALSE`) rather than rejecting the row or duplicating the question.
 
 ---
 
-## 4. Canonical Identity & Duplicate Detection
+## 3. Database Schema Changes (Migration 00006)
 
-A fundamental invariant of this platform is that **each question has exactly one canonical identity across the entire system**.
+Applied via Goose migration `00006_catalog_admin_and_archival.sql`:
 
-```mermaid
-flowchart TD
-    Row["Spreadsheet Row"]
-    ExtractURL["Extract & Normalize External URL<br/>(Strip UTM tags, trailing slashes, enforce HTTPS)"]
-    GenerateSlug["Generate Canonical Slug<br/>(e.g., 'leetcode-two-sum')"]
-    
-    CheckDB{"Exists in PostgreSQL<br/>by external_url or slug?"}
-    
-    UpdateMeta["UPDATE Existing Question Metadata<br/>(Title, Difficulty, Editorial Summary)<br/>PRESERVE canonical id and user progress!"]
-    InsertNew["INSERT New Question Record<br/>(Assign new UUIDv7, slug, created_at)"]
-    
-    Row --> ExtractURL --> GenerateSlug --> CheckDB
-    CheckDB -->|Yes: Conflict Found| UpdateMeta
-    CheckDB -->|No: New Question| InsertNew
+1. **`questions.is_active`** (`BOOLEAN NOT NULL DEFAULT TRUE`):
+   - Supports safe soft-deactivation. Candidates querying `/api/v1/questions` only see `is_active = TRUE`.
+   - Candidate attempts (`question_attempts`), solved status (`user_question_progress`), and spaced repetition schedules (`spaced_repetition_items`) are **permanently preserved**.
+2. **`questions.leetcode_id`** (`VARCHAR(50)`):
+   - Stores the original LeetCode / platform identifier.
+3. **`question_import_history`**:
+   - Audit trail table tracking every import execution: `id`, `filename`, `total_rows`, `valid_rows`, `created_questions`, `updated_questions`, `unchanged_questions`, `invalid_rows`, `status`, `imported_by`, `created_at`.
+
+---
+
+## 4. Admin Question Bank Management Workflows
+
+### A. Bulk Excel Import via Admin UI (`/admin`)
+
+The platform supports ongoing question management through the web interface without requiring command-line or SQL access:
+
+1. **Upload Selection**:
+   - Navigate to `http://localhost:3000/admin` $\rightarrow$ switch to the **Bulk Excel Import** tab.
+   - Choose **Browser Upload** (drag & drop or select `F:\DSA\FAANG_DSA_Master_Plan_v2.xlsx` from Windows Explorer) or **Host File Path**.
+2. **Preview & Validation Gate**:
+   - Click **Preview & Validate Workbook**.
+   - The backend validates all rows against schema rules, checks existing database records, and generates an interactive **Validation Scorecard**:
+     - Detected Sheet: `Master Plan`
+     - Total Rows Read: `621`
+     - Valid Rows: `621`
+     - Invalid Rows: `0`
+     - Unique Questions: `539`
+     - Cross-Listed Links: `82`
+     - Planned Creates: `539` (or `0` on re-import)
+     - Planned Updates / Unchanged: `531`
+     - First 15 Sample Rows Preview with proposed action badges (`CREATE`, `CROSS_LIST`, `UNCHANGED`).
+3. **Explicit Confirmation Gate**:
+   - Check the confirmation box: *"I have reviewed the validation scorecard and confirm committing these changes to PostgreSQL."*
+   - Click **Confirm & Commit Import to Database**.
+   - The transaction executes atomically, logs an audit record in `question_import_history`, and displays the final import metrics banner.
+
+### B. Question Bank CRUD & Archival (`/admin`)
+
+Under the **Question Bank Catalog** tab:
+
+1. **Search & Filter**:
+   - Real-time search by problem title or LeetCode ID.
+   - Filter dropdowns for Difficulty (`Easy`, `Medium`, `Hard`), Pattern, and Catalog Status (`Active Only`, `Archived Only`, `All Statuses`).
+2. **Add Question**:
+   - Click **Add Question** to open the modal.
+   - Enter Problem Title, Difficulty, Primary Pattern, LeetCode ID, Core flag, and Editorial Guidance.
+   - Saves via `POST /api/v1/admin/questions`.
+3. **Edit Question**:
+   - Click the pencil icon on any row to open the edit modal.
+   - Updates title, difficulty, pattern, or notes via `PUT /api/v1/admin/questions/{id}`.
+4. **Archive / Restore (Soft Deactivation)**:
+   - Click the archive icon on any active problem: instantly toggles `is_active = false`.
+   - The question is removed from the active candidate catalog (`/questions`), while all historical submissions, code revisions, and stats remain intact.
+   - Click the restore icon to reactivate the question in the candidate catalog.
+
+---
+
+## 5. CLI Importer (Operational Fallback)
+
+The CLI tool remains fully functional for scriptable or automated operational pipelines:
+
+```powershell
+# Dry-run validation (zero database writes)
+go run ./cmd/import-questions --file="F:\DSA\FAANG_DSA_Master_Plan_v2.xlsx" --dry-run
+
+# Atomic commit transaction
+go run ./cmd/import-questions --file="F:\DSA\FAANG_DSA_Master_Plan_v2.xlsx" --commit
 ```
 
-### Conflict Resolution & Invariants
-1. **Never Orphan User Progress**:
-   - Re-importing the spreadsheet or running updates **must never** delete rows from `questions`. Doing so would trigger cascade deletes or foreign key errors in `user_question_progress`, destroying candidate study history.
-2. **Metadata `UPSERT`**:
-   - If a question with matching `external_url` already exists, only editable metadata (`difficulty`, `editorial_summary`, `sample_time_limit_mins`) and pattern associations are refreshed.
-3. **Fuzzy Title Warnings**:
-   - If a row has an identical title to an existing question but a different external URL, the importer flags a `WARNING: Potential duplicate title with different URL` for manual review.
-
 ---
 
-## 5. Proposed Mapping Strategy
+## 6. Local Testing & Verification Procedure
 
-```text
-[Spreadsheet Column]                  [PostgreSQL Target]
---------------------                  -------------------
-Title                         ----->  questions.title
-External URL (Normalized)     ----->  questions.external_url & questions.slug
-Difficulty (EASY/MED/HARD)    ----->  questions.difficulty
-Core / Reinforcement Flag     ----->  questions.is_core
-Editorial Notes               ----->  questions.editorial_summary
-Pattern Name                  ----->  patterns.name (lookup or auto-create)
-                                      question_patterns (link as is_primary = TRUE)
-Subpattern / Variation Name   ----->  patterns.name (child pattern)
-                                      question_patterns (link as is_primary = FALSE)
-Company Mentions              ----->  companies.name
-                                      question_company_evidence (confidence: 'CONFIRMED')
-Prerequisite Titles           ----->  question_prerequisites (resolved by title/slug lookup)
-```
+Follow these beginner-friendly steps to test the end-to-end import locally:
 
----
-
-## 6. Two-Phase Execution: Dry-Run Preview & Validation
-
-To prevent corrupting the database with malformed rows, the CLI importer operates in two distinct phases:
-
-### Phase A: Dry-Run Validation (`--dry-run`)
-Reads the entire spreadsheet, performs all validations, checks against current database state, and prints a comprehensive audit report without executing a transaction:
-
-```text
-$ go run cmd/import-questions/main.go --file=master_dsa_bank.xlsx --dry-run
-
-=== QUESTION BANK IMPORT VALIDATION REPORT ===
-File: master_dsa_bank.xlsx
-Total Rows Read: 684
-Valid Rows: 681
-Invalid / Skipped Rows: 3
-
-Summary of Proposed Actions:
-  - New Questions to Insert: 650
-  - Existing Questions to Update: 31
-  - New Patterns to Create: 18
-  - Company Evidence Records to Create: 412
-  - Prerequisite Links to Establish: 94
-
-Errors / Warnings:
-  [Row 42]: Invalid external URL: "htt://leetcode/bad" (Skipped)
-  [Row 118]: Missing difficulty value (Defaulted to MEDIUM)
-  [Row 304]: Unknown prerequisite "Super Two Sum" not found in catalog (Warning)
-
-Status: DRY-RUN COMPLETED. No database changes were made.
-Run with --commit to execute changes.
-```
-
-### Phase B: Atomic Commit (`--commit`)
-When executed with the `--commit` flag:
-1. Opens a PostgreSQL transaction (`BEGIN`).
-2. Upserts patterns, questions, company links, and prerequisites in dependency order.
-3. If any unexpected error occurs, issues a `ROLLBACK`, leaving the database untouched.
-4. If successful, executes `COMMIT` and records an entry in `audit_logs`.
-
----
-
-## 7. Next Steps for Phase 3
-1. User provides the spreadsheet file in `data/` or project root.
-2. Inspect column headers and sample data using a quick Go inspection script or terminal tool.
-3. Implement `internal/catalog/importer/` with Excel parser library (`github.com/xuri/excelize/v2`).
-4. Execute dry-run and review validation report with the user before committing.
+1. **Ensure Local Stack is Running**:
+   ```powershell
+   docker compose -f docker-compose.local.yml up -d
+   ```
+2. **Sign In as Administrator**:
+   - Open browser: `http://localhost:3000/login`
+   - Sign in with the provisioned admin account:
+     - Email: `admin@adaptivedsa.local`
+     - Password: `AdminPassword123!`
+     *(Alternatively, sign in with `manthanpathania03@gmail.com` if you registered locally; it has also been granted `ADMIN` role).*
+3. **Open Admin Command Center**:
+   - Navigate to `http://localhost:3000/admin`.
+   - The role badge will display `SUPER_ADMIN`.
+4. **Preview Workbook Import**:
+   - Switch to the **Bulk Excel Import** tab.
+   - Click the upload box and select `F:\DSA\FAANG_DSA_Master_Plan_v2.xlsx`.
+   - Click **Preview & Validate Workbook**.
+   - Verify the scorecard shows `621 Total Rows`, `621 Valid Rows`, `0 Invalid Rows`.
+5. **Commit Import**:
+   - Check the confirmation checkbox and click **Confirm & Commit Import to Database**.
+   - Verify the success banner reports questions created and patterns linked.
+6. **Verify Candidate Catalog**:
+   - Navigate to `http://localhost:3000/questions`.
+   - Browse through the 539+ problems, search for "3Sum" or "Two Pointers", and verify pattern tags and difficulty badges render correctly.
+7. **Test Idempotency**:
+   - Return to `http://localhost:3000/admin` $\rightarrow$ **Bulk Excel Import**.
+   - Run **Preview & Validate Workbook** on the same file again.
+   - Notice: **Planned Creates** is `0` and sample rows show `UNCHANGED`. Zero duplicate questions are created.

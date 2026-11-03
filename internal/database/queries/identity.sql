@@ -105,3 +105,45 @@ SELECT id, actor_user_id, action, target_type, target_id, ip_address, user_agent
 FROM audit_logs
 ORDER BY created_at DESC
 LIMIT $1;
+
+-- name: GetUserProfile :one
+SELECT user_id, target_companies, target_date, timeline_label, daily_study_mins, preferred_days,
+       experience_level, familiar_patterns, daily_goal_questions, is_onboarding_completed,
+       selected_roadmap_id, diagnostic_results, created_at, updated_at
+FROM user_profiles
+WHERE user_id = $1;
+
+-- name: UpsertUserProfile :one
+INSERT INTO user_profiles (
+    user_id,
+    target_companies,
+    target_date,
+    timeline_label,
+    daily_study_mins,
+    preferred_days,
+    experience_level,
+    familiar_patterns,
+    daily_goal_questions,
+    is_onboarding_completed,
+    selected_roadmap_id,
+    diagnostic_results,
+    updated_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP
+) ON CONFLICT (user_id) DO UPDATE SET
+    target_companies = EXCLUDED.target_companies,
+    target_date = EXCLUDED.target_date,
+    timeline_label = EXCLUDED.timeline_label,
+    daily_study_mins = EXCLUDED.daily_study_mins,
+    preferred_days = EXCLUDED.preferred_days,
+    experience_level = EXCLUDED.experience_level,
+    familiar_patterns = EXCLUDED.familiar_patterns,
+    daily_goal_questions = EXCLUDED.daily_goal_questions,
+    is_onboarding_completed = EXCLUDED.is_onboarding_completed,
+    selected_roadmap_id = EXCLUDED.selected_roadmap_id,
+    diagnostic_results = EXCLUDED.diagnostic_results,
+    updated_at = CURRENT_TIMESTAMP
+RETURNING user_id, target_companies, target_date, timeline_label, daily_study_mins, preferred_days,
+          experience_level, familiar_patterns, daily_goal_questions, is_onboarding_completed,
+          selected_roadmap_id, diagnostic_results, created_at, updated_at;
+

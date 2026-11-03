@@ -71,7 +71,7 @@ func TestCatalogAndProgressEndpoints(t *testing.T) {
 	err = catRepo.AddRoadmapItem(ctx, rd.ID, q1.ID, 1, 1, true)
 	require.NoError(t, err)
 
-	srv := NewServer(cfg, logger, nil, idSvc, catSvc, progSvc)
+	srv := NewServer(cfg, logger, nil, idSvc, catSvc, progSvc, nil, nil, nil, nil)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

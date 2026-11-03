@@ -58,7 +58,7 @@ func setupTestServer(db database.Checker) *Server {
 		},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(cfg, logger, db, nil, nil, nil)
+	return NewServer(cfg, logger, db, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func TestServer_Healthz(t *testing.T) {

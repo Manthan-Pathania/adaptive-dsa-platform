@@ -15,6 +15,7 @@ import (
 	"github.com/adaptive-dsa/platform/internal/identity"
 	"github.com/adaptive-dsa/platform/internal/platform/database"
 	"github.com/adaptive-dsa/platform/internal/platform/logger"
+	"github.com/google/uuid"
 	"golang.org/x/term"
 )
 
@@ -35,6 +36,8 @@ func run() error {
 	switch command {
 	case "create":
 		return runCreateAdmin(os.Args[2:])
+	case "reconcile-credits":
+		return runReconcileCredits()
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command: %s", command)
@@ -141,6 +144,73 @@ func readPasswordSecurely() (string, error) {
 	return pass, nil
 }
 
+func runReconcileCredits() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	log := logger.New(cfg.Log.Level, "text", os.Stdout)
+	ctx := context.Background()
+
+	db, err := database.New(ctx, cfg.Database, log)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Pool().Query(ctx, `
+		SELECT 
+			a.user_id,
+			u.email,
+			a.cached_balance,
+			COALESCE(SUM(l.amount), 0) AS ledger_sum
+		FROM credit_accounts a
+		JOIN users u ON u.id = a.user_id
+		LEFT JOIN credit_ledger_entries l ON l.user_id = a.user_id
+		GROUP BY a.user_id, u.email, a.cached_balance
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query credit accounts: %w", err)
+	}
+	defer rows.Close()
+
+	var totalChecked int
+	var discrepancies int
+
+	fmt.Println("==================================================")
+	fmt.Println("Credit Balance Reconciliation Audit")
+	fmt.Println("==================================================")
+
+	for rows.Next() {
+		totalChecked++
+		var userID uuid.UUID
+		var email string
+		var cachedBalance int32
+		var ledgerSum int64
+
+		if err := rows.Scan(&userID, &email, &cachedBalance, &ledgerSum); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		if int64(cachedBalance) != ledgerSum {
+			discrepancies++
+			fmt.Printf("[DISCREPANCY] User: %s (%s) Cached: %d != LedgerSum: %d (Delta: %d)\n",
+				email, userID, cachedBalance, ledgerSum, int64(cachedBalance)-ledgerSum)
+		}
+	}
+
+	fmt.Println("--------------------------------------------------")
+	if discrepancies == 0 {
+		fmt.Printf("RECONCILIATION PASSED: All %d credit accounts in exact alignment with immutable ledger.\n", totalChecked)
+	} else {
+		fmt.Printf("RECONCILIATION FAILED: Found %d discrepancies across %d accounts!\n", discrepancies, totalChecked)
+		return fmt.Errorf("credit ledger reconciliation failed with %d discrepancies", discrepancies)
+	}
+	fmt.Println("==================================================")
+	return nil
+}
+
 func zeroBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
@@ -154,7 +224,8 @@ Usage:
   go run cmd/admin/main.go <command> [flags]
 
 Commands:
-  create    Provision a new administrator account with RoleAdmin (interactively prompts for password)
+  create             Provision a new administrator account with RoleAdmin (interactively prompts for password)
+  reconcile-credits  Verify double-entry credit ledger against cached balances and detect any discrepancies
 
 Flags for create:
   --email string

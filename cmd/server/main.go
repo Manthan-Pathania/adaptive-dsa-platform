@@ -6,14 +6,21 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/adaptive-dsa/platform/internal/adaptive"
+	"github.com/adaptive-dsa/platform/internal/ai"
 	"github.com/adaptive-dsa/platform/internal/catalog"
+	"github.com/adaptive-dsa/platform/internal/catalog/importer"
 	"github.com/adaptive-dsa/platform/internal/config"
+	"github.com/adaptive-dsa/platform/internal/credits"
 	"github.com/adaptive-dsa/platform/internal/identity"
+	"github.com/adaptive-dsa/platform/internal/payments"
 	"github.com/adaptive-dsa/platform/internal/platform/database"
 	"github.com/adaptive-dsa/platform/internal/platform/logger"
 	"github.com/adaptive-dsa/platform/internal/progress"
 	"github.com/adaptive-dsa/platform/internal/server"
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -47,6 +54,10 @@ func run() error {
 	var identitySvc identity.Service
 	var catalogSvc catalog.Service
 	var progressSvc progress.Service
+	var creditsSvc credits.Service
+	var aiSvc ai.Service
+	var adaptiveSvc adaptive.Service
+	var paymentsSvc payments.Service
 
 	db, err := database.New(ctx, cfg.Database, log)
 	if err != nil {
@@ -64,14 +75,66 @@ func run() error {
 		identitySvc = identity.NewService(identityRepo, cfg, log)
 
 		catalogRepo := catalog.NewPostgresRepository(db.Pool())
-		catalogSvc = catalog.NewService(catalogRepo)
+		catalogImp := importer.New(catalogRepo)
+		catalogSvc = catalog.NewService(catalogRepo, catalogImp)
 
 		progressRepo := progress.NewPostgresRepository(db.Pool())
 		progressSvc = progress.NewService(progressRepo)
+
+		creditsRepo := credits.NewPostgresRepository(db.Pool())
+		creditsSvc = credits.NewService(creditsRepo)
+
+		if identitySvc != nil && creditsSvc != nil {
+			identitySvc.SetOnUserRegistered(func(ctx context.Context, userID uuid.UUID) error {
+				welcomeAmount := int32(50)
+				if cfg != nil && cfg.AI.WelcomeCredits > 0 {
+					welcomeAmount = cfg.AI.WelcomeCredits
+				}
+				_, err := creditsSvc.EnsureAccount(ctx, userID, welcomeAmount)
+				return err
+			})
+		}
+
+		aiRepo := ai.NewPostgresRepository(db.Pool())
+		var aiProvider ai.AIProvider
+		useMockAI := os.Getenv("USE_MOCK_AI") == "true"
+		if !useMockAI && cfg.AI.GeminiAPIKey != "" {
+			log.InfoContext(ctx, "initializing Google Gemini AI tutor provider", "model", cfg.AI.GeminiModel)
+			aiProvider = ai.NewGeminiProvider(cfg.AI.GeminiAPIKey, cfg.AI.GeminiModel, cfg.AI.GeminiTimeout)
+		} else {
+			log.InfoContext(ctx, "using Mock AI Provider for deterministic local evaluation")
+			aiProvider = ai.NewMockAIProvider()
+		}
+		aiSvc = ai.NewService(aiRepo, aiProvider, creditsSvc, catalogSvc)
+
+		adaptiveRepo := adaptive.NewPostgresRepository(db.Pool())
+		adaptiveSvc = adaptive.NewService(adaptiveRepo, progressSvc, catalogSvc)
+
+		paymentsRepo := payments.NewPostgresRepository(db.Pool())
+		var paymentProvider payments.PaymentProvider
+		if cfg.Payments.RazorpayKeyID != "" && cfg.Payments.RazorpayKeySecret != "" && cfg.Payments.RazorpayKeyID != "rzp_test_placeholder_key_id" {
+			log.InfoContext(ctx, "initializing Razorpay payment gateway provider (test mode)")
+			paymentProvider = payments.NewRazorpayProvider(
+				cfg.Payments.RazorpayKeyID,
+				cfg.Payments.RazorpayKeySecret,
+				cfg.Payments.RazorpayWebhookSecret,
+				10*time.Second,
+			)
+		} else {
+			log.InfoContext(ctx, "Razorpay credentials not configured; using Mock Payment Provider for offline development")
+			paymentProvider = payments.NewMockPaymentProvider()
+		}
+		paymentsSvc = payments.NewService(paymentsRepo, paymentProvider, creditsSvc, log)
+
+		// Start durable background payment worker with cancellable lifecycle context
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		defer workerCancel()
+		paymentWorker := payments.NewWorker(paymentsRepo, log)
+		go paymentWorker.Start(workerCtx)
 	}
 
 	// 4. Initialize HTTP server
-	srv := server.NewServer(cfg, log, dbChecker, identitySvc, catalogSvc, progressSvc)
+	srv := server.NewServer(cfg, log, dbChecker, identitySvc, catalogSvc, progressSvc, creditsSvc, aiSvc, adaptiveSvc, paymentsSvc)
 
 	// Channel to capture critical server runtime errors
 	serverErrors := make(chan error, 1)

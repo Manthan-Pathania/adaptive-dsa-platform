@@ -32,10 +32,17 @@ type Repository interface {
 	GetQuestionByID(ctx context.Context, id uuid.UUID) (*Question, error)
 	GetQuestionBySlug(ctx context.Context, slug string) (*Question, error)
 	GetQuestionByExternalURL(ctx context.Context, externalURL string) (*Question, error)
+	FindQuestionForImport(ctx context.Context, title, leetcodeID, slug string) (*Question, error)
 	ListQuestions(ctx context.Context, filter ListQuestionsFilter) ([]Question, int64, error)
+	UpdateQuestion(ctx context.Context, id uuid.UUID, p UpdateQuestionParams) (*Question, error)
+	SetQuestionActive(ctx context.Context, id uuid.UUID, isActive bool) error
+	RemoveQuestionPatterns(ctx context.Context, questionID uuid.UUID) error
 
 	LinkQuestionPattern(ctx context.Context, questionID, patternID uuid.UUID, isPrimary bool) error
 	GetQuestionPatterns(ctx context.Context, questionID uuid.UUID) ([]Pattern, error)
+
+	RecordImportHistory(ctx context.Context, h *ImportHistory) (*ImportHistory, error)
+	ListImportHistory(ctx context.Context, limit, offset int32) ([]ImportHistory, error)
 
 	CreateCompany(ctx context.Context, name, slug string) (uuid.UUID, error)
 	GetCompanyByName(ctx context.Context, name string) (uuid.UUID, error)
@@ -46,8 +53,11 @@ type Repository interface {
 	GetRoadmapBySlug(ctx context.Context, slug string) (*Roadmap, error)
 	GetRoadmapByID(ctx context.Context, id uuid.UUID) (*Roadmap, error)
 	ListCuratedRoadmaps(ctx context.Context) ([]Roadmap, error)
+	ListRoadmapsForUser(ctx context.Context, userID *uuid.UUID) ([]Roadmap, error)
+	DeleteRoadmap(ctx context.Context, id uuid.UUID) error
 	AddRoadmapItem(ctx context.Context, roadmapID, questionID uuid.UUID, stageNumber, orderIndex int32, isMandatory bool) error
 	ListRoadmapItems(ctx context.Context, roadmapID uuid.UUID) ([]RoadmapItem, error)
+	GetPatternsProgress(ctx context.Context, userID uuid.UUID) ([]PatternProgressItem, error)
 
 	ExecTx(ctx context.Context, fn func(repo Repository) error) error
 }
@@ -370,6 +380,10 @@ func (r *pgxRepository) UpsertQuestion(ctx context.Context, q *Question) (*Quest
 	if q.EditorialSummary != nil {
 		edSummary = pgtype.Text{String: *q.EditorialSummary, Valid: true}
 	}
+	var leetcodeID pgtype.Text
+	if q.LeetCodeID != nil && *q.LeetCodeID != "" {
+		leetcodeID = pgtype.Text{String: *q.LeetCodeID, Valid: true}
+	}
 
 	res, err := r.q.UpsertQuestion(ctx, generated.UpsertQuestionParams{
 		Slug:                q.Slug,
@@ -379,6 +393,8 @@ func (r *pgxRepository) UpsertQuestion(ctx context.Context, q *Question) (*Quest
 		IsCore:              q.IsCore,
 		EditorialSummary:    edSummary,
 		SampleTimeLimitMins: q.SampleTimeLimitMins,
+		LeetcodeID:          leetcodeID,
+		IsActive:            q.IsActive,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("upsert question: %w", err)
@@ -388,6 +404,10 @@ func (r *pgxRepository) UpsertQuestion(ctx context.Context, q *Question) (*Quest
 	if res.EditorialSummary.Valid {
 		resSummary = &res.EditorialSummary.String
 	}
+	var resLeetCodeID *string
+	if res.LeetcodeID.Valid {
+		resLeetCodeID = &res.LeetcodeID.String
+	}
 
 	return &Question{
 		ID:                  toUUID(res.ID),
@@ -396,6 +416,8 @@ func (r *pgxRepository) UpsertQuestion(ctx context.Context, q *Question) (*Quest
 		ExternalURL:         res.ExternalUrl,
 		Difficulty:          Difficulty(res.Difficulty),
 		IsCore:              res.IsCore,
+		IsActive:            res.IsActive,
+		LeetCodeID:          resLeetCodeID,
 		EditorialSummary:    resSummary,
 		SampleTimeLimitMins: res.SampleTimeLimitMins,
 		CreatedAt:           res.CreatedAt.Time,
@@ -415,6 +437,10 @@ func (r *pgxRepository) GetQuestionByID(ctx context.Context, id uuid.UUID) (*Que
 	if res.EditorialSummary.Valid {
 		resSummary = &res.EditorialSummary.String
 	}
+	var resLeetCodeID *string
+	if res.LeetcodeID.Valid {
+		resLeetCodeID = &res.LeetcodeID.String
+	}
 	return &Question{
 		ID:                  toUUID(res.ID),
 		Slug:                res.Slug,
@@ -422,8 +448,11 @@ func (r *pgxRepository) GetQuestionByID(ctx context.Context, id uuid.UUID) (*Que
 		ExternalURL:         res.ExternalUrl,
 		Difficulty:          Difficulty(res.Difficulty),
 		IsCore:              res.IsCore,
+		IsActive:            res.IsActive,
+		LeetCodeID:          resLeetCodeID,
 		EditorialSummary:    resSummary,
 		SampleTimeLimitMins: res.SampleTimeLimitMins,
+		ExcelOrder:          res.ExcelOrder,
 		CreatedAt:           res.CreatedAt.Time,
 		UpdatedAt:           res.UpdatedAt.Time,
 	}, nil
@@ -441,6 +470,10 @@ func (r *pgxRepository) GetQuestionBySlug(ctx context.Context, slug string) (*Qu
 	if res.EditorialSummary.Valid {
 		resSummary = &res.EditorialSummary.String
 	}
+	var resLeetCodeID *string
+	if res.LeetcodeID.Valid {
+		resLeetCodeID = &res.LeetcodeID.String
+	}
 	return &Question{
 		ID:                  toUUID(res.ID),
 		Slug:                res.Slug,
@@ -448,8 +481,11 @@ func (r *pgxRepository) GetQuestionBySlug(ctx context.Context, slug string) (*Qu
 		ExternalURL:         res.ExternalUrl,
 		Difficulty:          Difficulty(res.Difficulty),
 		IsCore:              res.IsCore,
+		IsActive:            res.IsActive,
+		LeetCodeID:          resLeetCodeID,
 		EditorialSummary:    resSummary,
 		SampleTimeLimitMins: res.SampleTimeLimitMins,
+		ExcelOrder:          res.ExcelOrder,
 		CreatedAt:           res.CreatedAt.Time,
 		UpdatedAt:           res.UpdatedAt.Time,
 	}, nil
@@ -467,6 +503,10 @@ func (r *pgxRepository) GetQuestionByExternalURL(ctx context.Context, externalUR
 	if res.EditorialSummary.Valid {
 		resSummary = &res.EditorialSummary.String
 	}
+	var resLeetCodeID *string
+	if res.LeetcodeID.Valid {
+		resLeetCodeID = &res.LeetcodeID.String
+	}
 	return &Question{
 		ID:                  toUUID(res.ID),
 		Slug:                res.Slug,
@@ -474,11 +514,62 @@ func (r *pgxRepository) GetQuestionByExternalURL(ctx context.Context, externalUR
 		ExternalURL:         res.ExternalUrl,
 		Difficulty:          Difficulty(res.Difficulty),
 		IsCore:              res.IsCore,
+		IsActive:            res.IsActive,
+		LeetCodeID:          resLeetCodeID,
 		EditorialSummary:    resSummary,
 		SampleTimeLimitMins: res.SampleTimeLimitMins,
+		ExcelOrder:          res.ExcelOrder,
 		CreatedAt:           res.CreatedAt.Time,
 		UpdatedAt:           res.UpdatedAt.Time,
 	}, nil
+}
+
+func (r *pgxRepository) FindQuestionForImport(ctx context.Context, title, leetcodeID, slug string) (*Question, error) {
+	query := `
+		SELECT id, slug, title, external_url, difficulty, is_core, is_active, leetcode_id, editorial_summary, sample_time_limit_mins, excel_order, created_at, updated_at
+		FROM questions
+		WHERE LOWER(title) = LOWER($1)
+		   OR (NULLIF($2, '') IS NOT NULL AND leetcode_id = $2)
+		   OR (NULLIF($3, '') IS NOT NULL AND slug = $3)
+		LIMIT 1;
+	`
+	var q Question
+	var diff string
+	var resLC pgtype.Text
+	var resSummary pgtype.Text
+	var resCreatedAt pgtype.Timestamptz
+	var resUpdatedAt pgtype.Timestamptz
+	err := r.pool.QueryRow(ctx, query, title, leetcodeID, slug).Scan(
+		&q.ID,
+		&q.Slug,
+		&q.Title,
+		&q.ExternalURL,
+		&diff,
+		&q.IsCore,
+		&q.IsActive,
+		&resLC,
+		&resSummary,
+		&q.SampleTimeLimitMins,
+		&q.ExcelOrder,
+		&resCreatedAt,
+		&resUpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrQuestionNotFound
+		}
+		return nil, err
+	}
+	q.Difficulty = Difficulty(diff)
+	if resLC.Valid {
+		q.LeetCodeID = &resLC.String
+	}
+	if resSummary.Valid {
+		q.EditorialSummary = &resSummary.String
+	}
+	q.CreatedAt = resCreatedAt.Time
+	q.UpdatedAt = resUpdatedAt.Time
+	return &q, nil
 }
 
 func (r *pgxRepository) ListQuestions(ctx context.Context, filter ListQuestionsFilter) ([]Question, int64, error) {
@@ -486,22 +577,28 @@ func (r *pgxRepository) ListQuestions(ctx context.Context, filter ListQuestionsF
 	if filter.TopicOrPatternID != nil {
 		topicPatternUUID = pgtype.UUID{Bytes: *filter.TopicOrPatternID, Valid: true}
 	}
+	var isActive pgtype.Bool
+	if filter.IsActive != nil {
+		isActive = pgtype.Bool{Bool: *filter.IsActive, Valid: true}
+	}
 
 	rows, err := r.q.ListQuestions(ctx, generated.ListQuestionsParams{
-		Column1: filter.SearchQuery,
-		Column2: filter.Difficulty,
-		Column3: topicPatternUUID,
-		Limit:   filter.Limit,
-		Offset:  filter.Offset,
+		Column1:  filter.SearchQuery,
+		Column2:  filter.Difficulty,
+		Column3:  topicPatternUUID,
+		Limit:    filter.Limit,
+		Offset:   filter.Offset,
+		IsActive: isActive,
 	})
 	if err != nil {
 		return nil, 0, err
 	}
 
 	count, err := r.q.CountQuestions(ctx, generated.CountQuestionsParams{
-		Column1: filter.SearchQuery,
-		Column2: filter.Difficulty,
-		Column3: topicPatternUUID,
+		Column1:  filter.SearchQuery,
+		Column2:  filter.Difficulty,
+		Column3:  topicPatternUUID,
+		IsActive: isActive,
 	})
 	if err != nil {
 		return nil, 0, err
@@ -513,6 +610,10 @@ func (r *pgxRepository) ListQuestions(ctx context.Context, filter ListQuestionsF
 		if res.EditorialSummary.Valid {
 			resSummary = &res.EditorialSummary.String
 		}
+		var resLeetCodeID *string
+		if res.LeetcodeID.Valid {
+			resLeetCodeID = &res.LeetcodeID.String
+		}
 		questions[i] = Question{
 			ID:                  toUUID(res.ID),
 			Slug:                res.Slug,
@@ -520,13 +621,149 @@ func (r *pgxRepository) ListQuestions(ctx context.Context, filter ListQuestionsF
 			ExternalURL:         res.ExternalUrl,
 			Difficulty:          Difficulty(res.Difficulty),
 			IsCore:              res.IsCore,
+			IsActive:            res.IsActive,
+			LeetCodeID:          resLeetCodeID,
 			EditorialSummary:    resSummary,
 			SampleTimeLimitMins: res.SampleTimeLimitMins,
+			ExcelOrder:          res.ExcelOrder,
 			CreatedAt:           res.CreatedAt.Time,
 			UpdatedAt:           res.UpdatedAt.Time,
 		}
 	}
 	return questions, count, nil
+}
+
+func (r *pgxRepository) UpdateQuestion(ctx context.Context, id uuid.UUID, p UpdateQuestionParams) (*Question, error) {
+	var edSummary pgtype.Text
+	if p.EditorialSummary != nil {
+		edSummary = pgtype.Text{String: *p.EditorialSummary, Valid: true}
+	}
+	var leetcodeID pgtype.Text
+	if p.LeetCodeID != nil && *p.LeetCodeID != "" {
+		leetcodeID = pgtype.Text{String: *p.LeetCodeID, Valid: true}
+	}
+
+	res, err := r.q.UpdateQuestion(ctx, generated.UpdateQuestionParams{
+		ID:                  toPgUUID(id),
+		Title:               p.Title,
+		Difficulty:          generated.QuestionDifficulty(p.Difficulty),
+		IsCore:              p.IsCore,
+		EditorialSummary:    edSummary,
+		SampleTimeLimitMins: p.SampleTimeLimitMins,
+		LeetcodeID:          leetcodeID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("update question: %w", err)
+	}
+
+	var resSummary *string
+	if res.EditorialSummary.Valid {
+		resSummary = &res.EditorialSummary.String
+	}
+	var resLeetCodeID *string
+	if res.LeetcodeID.Valid {
+		resLeetCodeID = &res.LeetcodeID.String
+	}
+
+	return &Question{
+		ID:                  toUUID(res.ID),
+		Slug:                res.Slug,
+		Title:               res.Title,
+		ExternalURL:         res.ExternalUrl,
+		Difficulty:          Difficulty(res.Difficulty),
+		IsCore:              res.IsCore,
+		IsActive:            res.IsActive,
+		LeetCodeID:          resLeetCodeID,
+		EditorialSummary:    resSummary,
+		SampleTimeLimitMins: res.SampleTimeLimitMins,
+		CreatedAt:           res.CreatedAt.Time,
+		UpdatedAt:           res.UpdatedAt.Time,
+	}, nil
+}
+
+func (r *pgxRepository) SetQuestionActive(ctx context.Context, id uuid.UUID, isActive bool) error {
+	return r.q.SetQuestionActive(ctx, generated.SetQuestionActiveParams{
+		ID:       toPgUUID(id),
+		IsActive: isActive,
+	})
+}
+
+func (r *pgxRepository) RemoveQuestionPatterns(ctx context.Context, questionID uuid.UUID) error {
+	return r.q.RemoveQuestionPatterns(ctx, toPgUUID(questionID))
+}
+
+func (r *pgxRepository) RecordImportHistory(ctx context.Context, h *ImportHistory) (*ImportHistory, error) {
+	var importedBy pgtype.UUID
+	if h.ImportedBy != nil {
+		importedBy = toPgUUID(*h.ImportedBy)
+	}
+	res, err := r.q.RecordImportHistory(ctx, generated.RecordImportHistoryParams{
+		Filename:           h.Filename,
+		TotalRows:          h.TotalRows,
+		ValidRows:          h.ValidRows,
+		CreatedQuestions:   h.CreatedQuestions,
+		UpdatedQuestions:   h.UpdatedQuestions,
+		UnchangedQuestions: h.UnchangedQuestions,
+		InvalidRows:        h.InvalidRows,
+		Status:             h.Status,
+		ImportedBy:         importedBy,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("record import history: %w", err)
+	}
+
+	var resImportedBy *uuid.UUID
+	if res.ImportedBy.Valid {
+		u := toUUID(res.ImportedBy)
+		resImportedBy = &u
+	}
+
+	return &ImportHistory{
+		ID:                 toUUID(res.ID),
+		Filename:           res.Filename,
+		TotalRows:          res.TotalRows,
+		ValidRows:          res.ValidRows,
+		CreatedQuestions:   res.CreatedQuestions,
+		UpdatedQuestions:   res.UpdatedQuestions,
+		UnchangedQuestions: res.UnchangedQuestions,
+		InvalidRows:        res.InvalidRows,
+		Status:             res.Status,
+		ImportedBy:         resImportedBy,
+		CreatedAt:          res.CreatedAt.Time,
+	}, nil
+}
+
+func (r *pgxRepository) ListImportHistory(ctx context.Context, limit, offset int32) ([]ImportHistory, error) {
+	rows, err := r.q.ListImportHistory(ctx, generated.ListImportHistoryParams{
+		Limit:  limit,
+		Offset: offset,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list import history: %w", err)
+	}
+
+	history := make([]ImportHistory, len(rows))
+	for i, res := range rows {
+		var resImportedBy *uuid.UUID
+		if res.ImportedBy.Valid {
+			u := toUUID(res.ImportedBy)
+			resImportedBy = &u
+		}
+		history[i] = ImportHistory{
+			ID:                 toUUID(res.ID),
+			Filename:           res.Filename,
+			TotalRows:          res.TotalRows,
+			ValidRows:          res.ValidRows,
+			CreatedQuestions:   res.CreatedQuestions,
+			UpdatedQuestions:   res.UpdatedQuestions,
+			UnchangedQuestions: res.UnchangedQuestions,
+			InvalidRows:        res.InvalidRows,
+			Status:             res.Status,
+			ImportedBy:         resImportedBy,
+			CreatedAt:          res.CreatedAt.Time,
+		}
+	}
+	return history, nil
 }
 
 func (r *pgxRepository) LinkQuestionPattern(ctx context.Context, questionID, patternID uuid.UUID, isPrimary bool) error {
@@ -718,34 +955,159 @@ func (r *pgxRepository) GetRoadmapByID(ctx context.Context, id uuid.UUID) (*Road
 }
 
 func (r *pgxRepository) ListCuratedRoadmaps(ctx context.Context) ([]Roadmap, error) {
-	rows, err := r.q.ListCuratedRoadmaps(ctx)
+	query := `
+		SELECT r.id, r.user_id, r.title, r.slug, r.description, r.target_days, r.is_system_template,
+		       COALESCE((SELECT COUNT(*) FROM roadmap_items ri WHERE ri.roadmap_id = r.id), 0)::int as total_questions,
+		       r.created_at, r.updated_at
+		FROM roadmaps r
+		WHERE r.is_system_template = TRUE
+		ORDER BY r.created_at ASC;
+	`
+	rows, err := r.pool.Query(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list curated roadmaps: %w", err)
 	}
-	roadmaps := make([]Roadmap, len(rows))
-	for i, res := range rows {
-		var resDesc *string
-		if res.Description.Valid {
-			resDesc = &res.Description.String
+	defer rows.Close()
+
+	var roadmaps []Roadmap
+	for rows.Next() {
+		var rd Roadmap
+		var id, uID pgtype.UUID
+		var desc pgtype.Text
+		if err := rows.Scan(
+			&id,
+			&uID,
+			&rd.Title,
+			&rd.Slug,
+			&desc,
+			&rd.TargetDays,
+			&rd.IsSystemTemplate,
+			&rd.TotalQuestions,
+			&rd.CreatedAt,
+			&rd.UpdatedAt,
+		); err != nil {
+			return nil, err
 		}
-		var resUID *uuid.UUID
-		if res.UserID.Valid {
-			u := uuid.UUID(res.UserID.Bytes)
-			resUID = &u
+		rd.ID = toUUID(id)
+		if uID.Valid {
+			u := toUUID(uID)
+			rd.UserID = &u
 		}
-		roadmaps[i] = Roadmap{
-			ID:               toUUID(res.ID),
-			UserID:           resUID,
-			Title:            res.Title,
-			Slug:             res.Slug,
-			Description:      resDesc,
-			TargetDays:       res.TargetDays,
-			IsSystemTemplate: res.IsSystemTemplate,
-			CreatedAt:        res.CreatedAt.Time,
-			UpdatedAt:        res.UpdatedAt.Time,
+		if desc.Valid {
+			rd.Description = &desc.String
 		}
+		roadmaps = append(roadmaps, rd)
 	}
 	return roadmaps, nil
+}
+
+func (r *pgxRepository) ListRoadmapsForUser(ctx context.Context, userID *uuid.UUID) ([]Roadmap, error) {
+	var uid pgtype.UUID
+	if userID != nil {
+		uid = pgtype.UUID{Bytes: *userID, Valid: true}
+	}
+	query := `
+		SELECT r.id, r.user_id, r.title, r.slug, r.description, r.target_days, r.is_system_template,
+		       COALESCE((SELECT COUNT(*) FROM roadmap_items ri WHERE ri.roadmap_id = r.id), 0)::int as total_questions,
+		       r.created_at, r.updated_at
+		FROM roadmaps r
+		WHERE r.is_system_template = TRUE OR (r.user_id IS NOT NULL AND r.user_id = $1)
+		ORDER BY r.is_system_template DESC, r.created_at DESC;
+	`
+	rows, err := r.pool.Query(ctx, query, uid)
+	if err != nil {
+		return nil, fmt.Errorf("list roadmaps for user: %w", err)
+	}
+	defer rows.Close()
+
+	var roadmaps []Roadmap
+	for rows.Next() {
+		var rd Roadmap
+		var id, uID pgtype.UUID
+		var desc pgtype.Text
+		if err := rows.Scan(
+			&id,
+			&uID,
+			&rd.Title,
+			&rd.Slug,
+			&desc,
+			&rd.TargetDays,
+			&rd.IsSystemTemplate,
+			&rd.TotalQuestions,
+			&rd.CreatedAt,
+			&rd.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		rd.ID = toUUID(id)
+		if uID.Valid {
+			u := toUUID(uID)
+			rd.UserID = &u
+		}
+		if desc.Valid {
+			rd.Description = &desc.String
+		}
+		roadmaps = append(roadmaps, rd)
+	}
+	return roadmaps, nil
+}
+
+func (r *pgxRepository) DeleteRoadmap(ctx context.Context, id uuid.UUID) error {
+	tag, err := r.pool.Exec(ctx, "DELETE FROM roadmaps WHERE id = $1", id)
+	if err != nil {
+		return fmt.Errorf("delete roadmap: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRoadmapNotFound
+	}
+	return nil
+}
+
+func (r *pgxRepository) GetPatternsProgress(ctx context.Context, userID uuid.UUID) ([]PatternProgressItem, error) {
+	query := `
+		SELECT 
+			p.id,
+			p.name as pattern_name,
+			p.slug as pattern_slug,
+			COALESCE(t.name, 'General') as topic_name,
+			COUNT(DISTINCT qp.question_id)::int as total_questions,
+			COUNT(DISTINCT CASE WHEN uqp.status IN ('SOLVED', 'MASTERED') THEN uqp.question_id END)::int as solved_count
+		FROM patterns p
+		LEFT JOIN topics t ON p.topic_id = t.id
+		JOIN question_patterns qp ON p.id = qp.pattern_id
+		JOIN questions q ON qp.question_id = q.id AND q.is_active = true
+		LEFT JOIN user_question_progress uqp ON qp.question_id = uqp.question_id AND uqp.user_id = $1
+		WHERE p.parent_id IS NULL
+		GROUP BY p.id, p.name, p.slug, t.name, p.display_order
+		ORDER BY p.display_order ASC, p.name ASC;
+	`
+	rows, err := r.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get patterns progress: %w", err)
+	}
+	defer rows.Close()
+
+	var items []PatternProgressItem
+	for rows.Next() {
+		var item PatternProgressItem
+		var pid pgtype.UUID
+		if err := rows.Scan(
+			&pid,
+			&item.PatternName,
+			&item.PatternSlug,
+			&item.TopicName,
+			&item.TotalQuestions,
+			&item.SolvedCount,
+		); err != nil {
+			return nil, err
+		}
+		item.PatternID = toUUID(pid)
+		if item.TotalQuestions > 0 {
+			item.Percent = float32(item.SolvedCount) / float32(item.TotalQuestions) * 100.0
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func (r *pgxRepository) AddRoadmapItem(ctx context.Context, roadmapID, questionID uuid.UUID, stageNumber, orderIndex int32, isMandatory bool) error {
@@ -759,24 +1121,57 @@ func (r *pgxRepository) AddRoadmapItem(ctx context.Context, roadmapID, questionI
 }
 
 func (r *pgxRepository) ListRoadmapItems(ctx context.Context, roadmapID uuid.UUID) ([]RoadmapItem, error) {
-	rows, err := r.q.ListRoadmapItems(ctx, toPgUUID(roadmapID))
+	query := `
+		SELECT ri.id, ri.roadmap_id, ri.question_id, ri.stage_number, ri.order_index, ri.is_mandatory,
+		       q.title, q.slug as question_slug, q.difficulty, q.is_core,
+		       q.excel_order,
+		       COALESCE(
+		           (SELECT p.name FROM question_patterns qp JOIN patterns p ON qp.pattern_id = p.id WHERE qp.question_id = q.id AND p.parent_id IS NULL LIMIT 1),
+		           (SELECT parent.name FROM question_patterns qp JOIN patterns p ON qp.pattern_id = p.id JOIN patterns parent ON p.parent_id = parent.id WHERE qp.question_id = q.id AND parent.parent_id IS NULL LIMIT 1),
+		           (SELECT p.name FROM question_patterns qp JOIN patterns p ON qp.pattern_id = p.id WHERE qp.question_id = q.id LIMIT 1),
+		           'General'
+		       ) AS pattern_name,
+		       COALESCE(
+		           (SELECT sp.name FROM question_patterns qp JOIN patterns sp ON qp.pattern_id = sp.id WHERE qp.question_id = q.id AND sp.parent_id IS NOT NULL LIMIT 1),
+		           ''
+		       ) AS subpattern_name
+		FROM roadmap_items ri
+		JOIN questions q ON ri.question_id = q.id
+		WHERE ri.roadmap_id = $1
+		ORDER BY ri.stage_number ASC, ri.order_index ASC;
+	`
+	rows, err := r.pool.Query(ctx, query, roadmapID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list roadmap items: %w", err)
 	}
-	items := make([]RoadmapItem, len(rows))
-	for i, row := range rows {
-		items[i] = RoadmapItem{
-			ID:            toUUID(row.ID),
-			RoadmapID:     toUUID(row.RoadmapID),
-			QuestionID:    toUUID(row.QuestionID),
-			StageNumber:   row.StageNumber,
-			OrderIndex:    row.OrderIndex,
-			IsMandatory:   row.IsMandatory,
-			QuestionTitle: row.Title,
-			QuestionSlug:  row.QuestionSlug,
-			Difficulty:    Difficulty(row.Difficulty),
-			IsCore:        row.IsCore,
+	defer rows.Close()
+
+	var items []RoadmapItem
+	for rows.Next() {
+		var it RoadmapItem
+		var diff string
+		if err := rows.Scan(
+			&it.ID,
+			&it.RoadmapID,
+			&it.QuestionID,
+			&it.StageNumber,
+			&it.OrderIndex,
+			&it.IsMandatory,
+			&it.QuestionTitle,
+			&it.QuestionSlug,
+			&diff,
+			&it.IsCore,
+			&it.ExcelOrder,
+			&it.PatternName,
+			&it.SubpatternName,
+		); err != nil {
+			return nil, fmt.Errorf("scan roadmap item: %w", err)
 		}
+		it.Difficulty = Difficulty(diff)
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return items, nil
 }
@@ -817,6 +1212,7 @@ type InMemoryRepository struct {
 	qCompanies map[uuid.UUID][]string
 	roadmaps   map[uuid.UUID]Roadmap
 	roadItems  map[uuid.UUID][]RoadmapItem
+	history    []ImportHistory
 }
 
 func NewInMemoryRepository() *InMemoryRepository {
@@ -829,6 +1225,7 @@ func NewInMemoryRepository() *InMemoryRepository {
 		qCompanies: make(map[uuid.UUID][]string),
 		roadmaps:   make(map[uuid.UUID]Roadmap),
 		roadItems:  make(map[uuid.UUID][]RoadmapItem),
+		history:    make([]ImportHistory, 0),
 	}
 }
 
@@ -984,6 +1381,9 @@ func (m *InMemoryRepository) UpsertQuestion(ctx context.Context, q *Question) (*
 			existing.Title = q.Title
 			existing.Difficulty = q.Difficulty
 			existing.IsCore = q.IsCore
+			if q.LeetCodeID != nil {
+				existing.LeetCodeID = q.LeetCodeID
+			}
 			existing.EditorialSummary = q.EditorialSummary
 			existing.SampleTimeLimitMins = q.SampleTimeLimitMins
 			existing.UpdatedAt = time.Now().UTC()
@@ -997,6 +1397,11 @@ func (m *InMemoryRepository) UpsertQuestion(ctx context.Context, q *Question) (*
 	if id == uuid.Nil {
 		id = uuid.New()
 	}
+	isActive := q.IsActive
+	// Default to active on creation unless explicitly false when ID was already set
+	if !isActive {
+		isActive = true
+	}
 	now := time.Now().UTC()
 	created := Question{
 		ID:                  id,
@@ -1005,6 +1410,8 @@ func (m *InMemoryRepository) UpsertQuestion(ctx context.Context, q *Question) (*
 		ExternalURL:         q.ExternalURL,
 		Difficulty:          q.Difficulty,
 		IsCore:              q.IsCore,
+		IsActive:            isActive,
+		LeetCodeID:          q.LeetCodeID,
 		EditorialSummary:    q.EditorialSummary,
 		SampleTimeLimitMins: q.SampleTimeLimitMins,
 		CreatedAt:           now,
@@ -1049,12 +1456,35 @@ func (m *InMemoryRepository) GetQuestionByExternalURL(ctx context.Context, url s
 	return nil, ErrQuestionNotFound
 }
 
+func (m *InMemoryRepository) FindQuestionForImport(ctx context.Context, title, leetcodeID, slug string) (*Question, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, q := range m.questions {
+		if strings.EqualFold(q.Title, title) {
+			res := q
+			return &res, nil
+		}
+		if leetcodeID != "" && q.LeetCodeID != nil && *q.LeetCodeID == leetcodeID {
+			res := q
+			return &res, nil
+		}
+		if slug != "" && q.Slug == slug {
+			res := q
+			return &res, nil
+		}
+	}
+	return nil, ErrQuestionNotFound
+}
+
 func (m *InMemoryRepository) ListQuestions(ctx context.Context, filter ListQuestionsFilter) ([]Question, int64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var matched []Question
 	for _, q := range m.questions {
+		if filter.IsActive != nil && q.IsActive != *filter.IsActive {
+			continue
+		}
 		if filter.SearchQuery != "" && !strings.Contains(strings.ToLower(q.Title), strings.ToLower(filter.SearchQuery)) {
 			continue
 		}
@@ -1075,6 +1505,88 @@ func (m *InMemoryRepository) ListQuestions(ctx context.Context, filter ListQuest
 	}
 
 	return matched[start:end], total, nil
+}
+
+func (m *InMemoryRepository) UpdateQuestion(ctx context.Context, id uuid.UUID, p UpdateQuestionParams) (*Question, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q, ok := m.questions[id]
+	if !ok {
+		return nil, ErrQuestionNotFound
+	}
+	q.Title = p.Title
+	q.Difficulty = p.Difficulty
+	q.IsCore = p.IsCore
+	if p.LeetCodeID != nil {
+		q.LeetCodeID = p.LeetCodeID
+	}
+	q.EditorialSummary = p.EditorialSummary
+	q.SampleTimeLimitMins = p.SampleTimeLimitMins
+	q.UpdatedAt = time.Now().UTC()
+	m.questions[id] = q
+	res := q
+	return &res, nil
+}
+
+func (m *InMemoryRepository) SetQuestionActive(ctx context.Context, id uuid.UUID, isActive bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q, ok := m.questions[id]
+	if !ok {
+		return ErrQuestionNotFound
+	}
+	q.IsActive = isActive
+	q.UpdatedAt = time.Now().UTC()
+	m.questions[id] = q
+	return nil
+}
+
+func (m *InMemoryRepository) RemoveQuestionPatterns(ctx context.Context, questionID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.qPatterns, questionID)
+	return nil
+}
+
+func (m *InMemoryRepository) RecordImportHistory(ctx context.Context, h *ImportHistory) (*ImportHistory, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := h.ID
+	if id == uuid.Nil {
+		id = uuid.New()
+	}
+	rec := ImportHistory{
+		ID:                 id,
+		Filename:           h.Filename,
+		TotalRows:          h.TotalRows,
+		ValidRows:          h.ValidRows,
+		CreatedQuestions:   h.CreatedQuestions,
+		UpdatedQuestions:   h.UpdatedQuestions,
+		UnchangedQuestions: h.UnchangedQuestions,
+		InvalidRows:        h.InvalidRows,
+		Status:             h.Status,
+		ImportedBy:         h.ImportedBy,
+		CreatedAt:          time.Now().UTC(),
+	}
+	m.history = append([]ImportHistory{rec}, m.history...)
+	return &rec, nil
+}
+
+func (m *InMemoryRepository) ListImportHistory(ctx context.Context, limit, offset int32) ([]ImportHistory, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	total := len(m.history)
+	start := int(offset)
+	if start > total {
+		start = total
+	}
+	end := start + int(limit)
+	if end > total {
+		end = total
+	}
+	res := make([]ImportHistory, end-start)
+	copy(res, m.history[start:end])
+	return res, nil
 }
 
 func (m *InMemoryRepository) LinkQuestionPattern(ctx context.Context, questionID, patternID uuid.UUID, isPrimary bool) error {
@@ -1184,10 +1696,57 @@ func (m *InMemoryRepository) ListCuratedRoadmaps(ctx context.Context) ([]Roadmap
 	var list []Roadmap
 	for _, r := range m.roadmaps {
 		if r.IsSystemTemplate {
-			list = append(list, r)
+			rd := r
+			rd.TotalQuestions = int32(len(m.roadItems[r.ID]))
+			list = append(list, rd)
 		}
 	}
 	return list, nil
+}
+
+func (m *InMemoryRepository) ListRoadmapsForUser(ctx context.Context, userID *uuid.UUID) ([]Roadmap, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var list []Roadmap
+	for _, r := range m.roadmaps {
+		if r.IsSystemTemplate || (userID != nil && r.UserID != nil && *r.UserID == *userID) {
+			rd := r
+			rd.TotalQuestions = int32(len(m.roadItems[r.ID]))
+			list = append(list, rd)
+		}
+	}
+	return list, nil
+}
+
+func (m *InMemoryRepository) DeleteRoadmap(ctx context.Context, id uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.roadmaps[id]; !ok {
+		return ErrRoadmapNotFound
+	}
+	delete(m.roadmaps, id)
+	delete(m.roadItems, id)
+	return nil
+}
+
+func (m *InMemoryRepository) GetPatternsProgress(ctx context.Context, userID uuid.UUID) ([]PatternProgressItem, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var items []PatternProgressItem
+	for _, p := range m.patterns {
+		if p.ParentID == nil {
+			items = append(items, PatternProgressItem{
+				PatternID:      p.ID,
+				PatternName:    p.Name,
+				PatternSlug:    p.Slug,
+				TopicName:      "General",
+				TotalQuestions: 0,
+				SolvedCount:    0,
+				Percent:        0,
+			})
+		}
+	}
+	return items, nil
 }
 
 func (m *InMemoryRepository) AddRoadmapItem(ctx context.Context, roadmapID, questionID uuid.UUID, stageNumber, orderIndex int32, isMandatory bool) error {
@@ -1257,6 +1816,8 @@ func (m *InMemoryRepository) ExecTx(ctx context.Context, fn func(repo Repository
 	for k, v := range m.roadItems {
 		backupRoadItems[k] = append([]RoadmapItem(nil), v...)
 	}
+	backupHistory := make([]ImportHistory, len(m.history))
+	copy(backupHistory, m.history)
 	m.mu.Unlock()
 
 	if err := fn(m); err != nil {
@@ -1269,6 +1830,7 @@ func (m *InMemoryRepository) ExecTx(ctx context.Context, fn func(repo Repository
 		m.qCompanies = backupQCompanies
 		m.roadmaps = backupRoadmaps
 		m.roadItems = backupRoadItems
+		m.history = backupHistory
 		m.mu.Unlock()
 		return err
 	}

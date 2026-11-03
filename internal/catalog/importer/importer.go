@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 
@@ -19,44 +18,14 @@ var (
 	ErrProductionSafety = errors.New("importing into production requires explicit confirmation (--confirm-prod)")
 )
 
-// ImportOptions configures the importer execution.
-type ImportOptions struct {
-	FilePath    string
-	Reader      io.Reader
-	DryRun      bool
-	Environment string
-	ConfirmProd bool
-}
+// Type aliases from catalog domain
+type ImportOptions = catalog.ImportOptions
 
-// RowError models a validation error pinpointed to a specific spreadsheet row.
-type RowError struct {
-	Row     int    `json:"row"`
-	Column  string `json:"column"`
-	Message string `json:"message"`
-}
-
-func (e RowError) Error() string {
-	if e.Column != "" {
-		return fmt.Sprintf("Row %d [%s]: %s", e.Row, e.Column, e.Message)
-	}
-	return fmt.Sprintf("Row %d: %s", e.Row, e.Message)
-}
-
-// ImportResult provides a comprehensive report of the import run.
-type ImportResult struct {
-	IsDryRun           bool       `json:"is_dry_run"`
-	TotalRowsRead      int        `json:"total_rows_read"`
-	ValidRows          int        `json:"valid_rows"`
-	InvalidRows        int        `json:"invalid_rows"`
-	CreatedQuestions   int        `json:"created_questions"`
-	UpdatedQuestions   int        `json:"updated_questions"`
-	UnchangedQuestions int        `json:"unchanged_questions"`
-	CreatedTopics      int        `json:"created_topics"`
-	CreatedPatterns    int        `json:"created_patterns"`
-	CreatedCompanies   int        `json:"created_companies"`
-	RowErrors          []RowError `json:"row_errors"`
-	Warnings           []string   `json:"warnings"`
-}
+// Type aliases from catalog domain
+type RowError = catalog.RowError
+type SamplePreviewRow = catalog.SamplePreviewRow
+type ImportPreviewResult = catalog.ImportPreviewResult
+type ImportResult = catalog.ImportResult
 
 // ParsedQuestionRow models the validated data of a single spreadsheet row.
 type ParsedQuestionRow struct {
@@ -69,9 +38,11 @@ type ParsedQuestionRow struct {
 	PrimaryPattern      string
 	Subpattern          string
 	IsCore              bool
+	LeetCodeID          string
 	Companies           []string
 	EditorialSummary    *string
 	SampleTimeLimitMins int32
+	IsCrossListed       bool
 }
 
 // Importer coordinates parsing, validation, and safe transactional persistence.
@@ -84,13 +55,7 @@ func New(repo catalog.Repository) *Importer {
 	return &Importer{repo: repo}
 }
 
-// Execute runs the import process according to the provided options.
-func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportResult, error) {
-	// Guard against accidental production runs
-	if strings.EqualFold(opts.Environment, "production") && !opts.ConfirmProd {
-		return nil, ErrProductionSafety
-	}
-
+func openWorkbook(opts ImportOptions) (*excelize.File, func(), error) {
 	var f *excelize.File
 	var err error
 
@@ -99,20 +64,183 @@ func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportRe
 	} else if opts.FilePath != "" {
 		f, err = excelize.OpenFile(opts.FilePath)
 	} else {
-		return nil, errors.New("neither file path nor reader provided")
+		return nil, nil, errors.New("neither file path nor reader provided")
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to open excel workbook: %w", err)
+		return nil, nil, fmt.Errorf("failed to open excel workbook: %w", err)
 	}
-	defer func() { _ = f.Close() }()
 
+	cleanup := func() { _ = f.Close() }
+	return f, cleanup, nil
+}
+
+func findWorksheet(f *excelize.File) (string, error) {
 	sheetList := f.GetSheetList()
 	if len(sheetList) == 0 {
+		return "", ErrEmptyFile
+	}
+	// Prefer known catalog sheets
+	for _, name := range sheetList {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower == "master plan" || lower == "master_plan" || lower == "questions" || lower == "problems" || lower == "dsa plan" {
+			return name, nil
+		}
+	}
+	return sheetList[0], nil
+}
+
+type seenQuestionInfo struct {
+	rowNumber int
+	title     string
+}
+
+// Preview parses and validates the spreadsheet without making any database modifications.
+func (imp *Importer) Preview(ctx context.Context, opts ImportOptions) (*ImportPreviewResult, error) {
+	f, cleanup, err := openWorkbook(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	sheetName, err := findWorksheet(f)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := f.GetRows(sheetName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read sheet %q: %w", sheetName, err)
+	}
+
+	if len(rows) < 2 {
 		return nil, ErrEmptyFile
 	}
 
-	sheetName := sheetList[0]
+	headerMap, err := parseHeaders(rows[0])
+	if err != nil {
+		return nil, fmt.Errorf("header validation: %w", err)
+	}
+
+	preview := &ImportPreviewResult{
+		DetectedSheet: sheetName,
+	}
+
+	seenURLs := make(map[string]seenQuestionInfo)
+	var parsedRows []ParsedQuestionRow
+
+	for i := 1; i < len(rows); i++ {
+		rowIdx := i + 1
+		row := rows[i]
+
+		if isEmptyRow(row) {
+			continue
+		}
+
+		preview.TotalRowsRead++
+
+		parsed, rowErrs := validateRow(rowIdx, row, headerMap)
+		if len(rowErrs) > 0 {
+			preview.InvalidRows++
+			preview.RowErrors = append(preview.RowErrors, rowErrs...)
+			if headerMap.URL >= 0 && headerMap.URL < len(row) {
+				if cleanURL, urlErr := catalog.NormalizeExternalURL(row[headerMap.URL]); urlErr == nil {
+					if _, exists := seenURLs[cleanURL]; !exists {
+						seenURLs[cleanURL] = seenQuestionInfo{rowNumber: rowIdx, title: ""}
+					}
+				}
+			}
+			continue
+		}
+
+		// Check if URL was already seen
+		if prev, exists := seenURLs[parsed.ExternalURL]; exists {
+			// If titles differ, it's a conflicting URL error
+			if !strings.EqualFold(prev.title, parsed.Title) {
+				preview.InvalidRows++
+				preview.RowErrors = append(preview.RowErrors, RowError{
+					Row:     rowIdx,
+					Column:  "External URL",
+					Message: fmt.Sprintf("Duplicate URL in spreadsheet; previously defined on row %d", prev.rowNumber),
+				})
+				continue
+			}
+			// Same title under another pattern => Cross-listing
+			parsed.IsCrossListed = true
+			preview.CrossListedRows++
+		} else {
+			seenURLs[parsed.ExternalURL] = seenQuestionInfo{
+				rowNumber: rowIdx,
+				title:     parsed.Title,
+			}
+			preview.UniqueQuestions++
+		}
+
+		preview.ValidRows++
+		parsedRows = append(parsedRows, *parsed)
+	}
+
+	// Inspect existing records in repository to forecast changes
+	sampleCount := 0
+	for _, pr := range parsedRows {
+		action := "CREATE"
+		if pr.IsCrossListed {
+			action = "CROSS_LIST"
+		} else {
+			existing, getErr := imp.repo.GetQuestionByExternalURL(ctx, pr.ExternalURL)
+			if getErr != nil {
+				preview.PlannedCreates++
+				action = "CREATE"
+			} else {
+				if existing.Title != pr.Title ||
+					existing.Difficulty != pr.Difficulty ||
+					existing.IsCore != pr.IsCore ||
+					existing.SampleTimeLimitMins != pr.SampleTimeLimitMins {
+					preview.PlannedUpdates++
+					action = "UPDATE"
+				} else {
+					preview.PlannedUnchanged++
+					action = "UNCHANGED"
+				}
+			}
+		}
+
+		if sampleCount < 20 {
+			preview.SampleRows = append(preview.SampleRows, SamplePreviewRow{
+				RowNumber:   pr.RowNumber,
+				Title:       pr.Title,
+				Difficulty:  pr.Difficulty,
+				Pattern:     pr.PrimaryPattern,
+				Subpattern:  pr.Subpattern,
+				LeetCodeID:  pr.LeetCodeID,
+				ExternalURL: pr.ExternalURL,
+				Action:      action,
+			})
+			sampleCount++
+		}
+	}
+
+	return preview, nil
+}
+
+// Execute runs the import process according to the provided options.
+func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportResult, error) {
+	// Guard against accidental production runs
+	if strings.EqualFold(opts.Environment, "production") && !opts.ConfirmProd {
+		return nil, ErrProductionSafety
+	}
+
+	f, cleanup, err := openWorkbook(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	sheetName, err := findWorksheet(f)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := f.GetRows(sheetName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read sheet %q: %w", sheetName, err)
@@ -132,7 +260,7 @@ func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportRe
 	}
 
 	var parsedRows []ParsedQuestionRow
-	seenURLs := make(map[string]int)
+	seenURLs := make(map[string]seenQuestionInfo)
 
 	// Validate all rows
 	for i := 1; i < len(rows); i++ {
@@ -152,31 +280,35 @@ func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportRe
 			result.RowErrors = append(result.RowErrors, rowErrs...)
 			if headerMap.URL >= 0 && headerMap.URL < len(row) {
 				if cleanURL, urlErr := catalog.NormalizeExternalURL(row[headerMap.URL]); urlErr == nil {
-					if firstRow, exists := seenURLs[cleanURL]; exists {
-						result.RowErrors = append(result.RowErrors, RowError{
-							Row:     rowIdx,
-							Column:  "External URL",
-							Message: fmt.Sprintf("Duplicate URL in spreadsheet; previously defined on row %d", firstRow),
-						})
-					} else {
-						seenURLs[cleanURL] = rowIdx
+					if _, exists := seenURLs[cleanURL]; !exists {
+						seenURLs[cleanURL] = seenQuestionInfo{rowNumber: rowIdx, title: ""}
 					}
 				}
 			}
 			continue
 		}
 
-		// Check for duplicate URLs within the same file
-		if firstRow, exists := seenURLs[parsed.ExternalURL]; exists {
-			result.InvalidRows++
-			result.RowErrors = append(result.RowErrors, RowError{
-				Row:     rowIdx,
-				Column:  "External URL",
-				Message: fmt.Sprintf("Duplicate URL in spreadsheet; previously defined on row %d", firstRow),
-			})
-			continue
+		// Check for duplicate / cross-listed URLs within the same file
+		if prev, exists := seenURLs[parsed.ExternalURL]; exists {
+			// If titles differ, it is an invalid conflicting URL
+			if !strings.EqualFold(prev.title, parsed.Title) {
+				result.InvalidRows++
+				result.RowErrors = append(result.RowErrors, RowError{
+					Row:     rowIdx,
+					Column:  "External URL",
+					Message: fmt.Sprintf("Duplicate URL in spreadsheet; previously defined on row %d", prev.rowNumber),
+				})
+				continue
+			}
+			// Same title under different pattern => Cross-listing
+			parsed.IsCrossListed = true
+			result.CrossListedRows++
+		} else {
+			seenURLs[parsed.ExternalURL] = seenQuestionInfo{
+				rowNumber: rowIdx,
+				title:     parsed.Title,
+			}
 		}
-		seenURLs[parsed.ExternalURL] = rowIdx
 
 		result.ValidRows++
 		parsedRows = append(parsedRows, *parsed)
@@ -185,6 +317,9 @@ func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportRe
 	// In Dry-Run mode, inspect existing records to report proposed changes without mutating the database
 	if opts.DryRun {
 		for _, pr := range parsedRows {
+			if pr.IsCrossListed {
+				continue
+			}
 			existing, getErr := imp.repo.GetQuestionByExternalURL(ctx, pr.ExternalURL)
 			if getErr != nil {
 				result.CreatedQuestions++
@@ -286,6 +421,11 @@ func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportRe
 			}
 
 			// 4. Upsert Question (Canonical Identity preserved by external_url)
+			var leetCodeID *string
+			if pr.LeetCodeID != "" {
+				leetCodeID = &pr.LeetCodeID
+			}
+
 			existing, getErr := txRepo.GetQuestionByExternalURL(ctx, pr.ExternalURL)
 			upserted, err := txRepo.UpsertQuestion(ctx, &catalog.Question{
 				Slug:                pr.Slug,
@@ -293,6 +433,8 @@ func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportRe
 				ExternalURL:         pr.ExternalURL,
 				Difficulty:          pr.Difficulty,
 				IsCore:              pr.IsCore,
+				IsActive:            true,
+				LeetCodeID:          leetCodeID,
 				EditorialSummary:    pr.EditorialSummary,
 				SampleTimeLimitMins: pr.SampleTimeLimitMins,
 			})
@@ -300,19 +442,23 @@ func (imp *Importer) Execute(ctx context.Context, opts ImportOptions) (*ImportRe
 				return fmt.Errorf("row %d upsert question: %w", pr.RowNumber, err)
 			}
 
-			if getErr != nil {
-				result.CreatedQuestions++
-			} else {
-				if existing.Title != pr.Title || existing.Difficulty != pr.Difficulty || existing.IsCore != pr.IsCore {
-					result.UpdatedQuestions++
+			if !pr.IsCrossListed {
+				if getErr != nil {
+					result.CreatedQuestions++
 				} else {
-					result.UnchangedQuestions++
+					if existing.Title != pr.Title || existing.Difficulty != pr.Difficulty || existing.IsCore != pr.IsCore {
+						result.UpdatedQuestions++
+					} else {
+						result.UnchangedQuestions++
+					}
 				}
 			}
 
-			// 5. Link Primary Pattern
-			if err := txRepo.LinkQuestionPattern(ctx, upserted.ID, patternID, true); err != nil {
-				return fmt.Errorf("row %d link primary pattern: %w", pr.RowNumber, err)
+			// 5. Link Pattern
+			// First occurrence gets primary flag; cross-listed occurrences link as secondary
+			isPrimary := !pr.IsCrossListed
+			if err := txRepo.LinkQuestionPattern(ctx, upserted.ID, patternID, isPrimary); err != nil {
+				return fmt.Errorf("row %d link pattern: %w", pr.RowNumber, err)
 			}
 
 			// 6. Link Subpattern (if present)
@@ -366,6 +512,8 @@ type headerIndices struct {
 	Companies      int
 	Editorial      int
 	TimeLimit      int
+	LeetCodeID     int
+	Progress       int
 }
 
 func parseHeaders(headerRow []string) (*headerIndices, error) {
@@ -380,12 +528,14 @@ func parseHeaders(headerRow []string) (*headerIndices, error) {
 		Companies:      -1,
 		Editorial:      -1,
 		TimeLimit:      -1,
+		LeetCodeID:     -1,
+		Progress:       -1,
 	}
 
 	for idx, col := range headerRow {
 		clean := strings.ToLower(strings.TrimSpace(col))
 		switch clean {
-		case "title", "problem title", "question title", "name":
+		case "problem", "title", "problem title", "question title", "name", "problem name":
 			h.Title = idx
 		case "url", "external url", "problem url", "problem link", "link", "leetcode url":
 			h.URL = idx
@@ -397,12 +547,16 @@ func parseHeaders(headerRow []string) (*headerIndices, error) {
 			h.PrimaryPattern = idx
 		case "subpattern", "variation", "secondary pattern":
 			h.Subpattern = idx
+		case "leetcode id", "leetcode_id", "lc id", "lc_id", "problem id", "id":
+			h.LeetCodeID = idx
+		case "notes", "editorial", "editorial summary", "editorial notes", "hints", "summary":
+			h.Editorial = idx
+		case "progress", "status":
+			h.Progress = idx
 		case "core", "is core", "core/optional", "type":
 			h.Core = idx
 		case "company", "companies", "target companies", "company tags":
 			h.Companies = idx
-		case "editorial", "editorial summary", "notes", "editorial notes", "hints", "summary":
-			h.Editorial = idx
 		case "time limit", "time limit (mins)", "time (mins)", "time_mins":
 			h.TimeLimit = idx
 		}
@@ -410,16 +564,10 @@ func parseHeaders(headerRow []string) (*headerIndices, error) {
 
 	var missing []string
 	if h.Title == -1 {
-		missing = append(missing, "Title")
-	}
-	if h.URL == -1 {
-		missing = append(missing, "External URL")
+		missing = append(missing, "Title / Problem")
 	}
 	if h.Difficulty == -1 {
 		missing = append(missing, "Difficulty")
-	}
-	if h.Topic == -1 {
-		missing = append(missing, "Topic")
 	}
 	if h.PrimaryPattern == -1 {
 		missing = append(missing, "Pattern / Primary Pattern")
@@ -447,10 +595,19 @@ func validateRow(rowIdx int, row []string, h *headerIndices) (*ParsedQuestionRow
 		errs = append(errs, RowError{Row: rowIdx, Column: "Title", Message: "Title cannot be empty"})
 	}
 
+	slug := catalog.Slugify(title)
+
+	// URL Handling: If URL column missing or empty, synthesize canonical LeetCode URL
+	var cleanURL string
 	rawURL := getVal(h.URL)
-	cleanURL, urlErr := catalog.NormalizeExternalURL(rawURL)
-	if urlErr != nil {
-		errs = append(errs, RowError{Row: rowIdx, Column: "External URL", Message: fmt.Sprintf("Invalid URL: %v", urlErr)})
+	if rawURL != "" {
+		var urlErr error
+		cleanURL, urlErr = catalog.NormalizeExternalURL(rawURL)
+		if urlErr != nil {
+			errs = append(errs, RowError{Row: rowIdx, Column: "External URL", Message: fmt.Sprintf("Invalid URL: %v", urlErr)})
+		}
+	} else if slug != "" {
+		cleanURL = fmt.Sprintf("https://leetcode.com/problems/%s/", slug)
 	}
 
 	rawDiff := getVal(h.Difficulty)
@@ -459,14 +616,15 @@ func validateRow(rowIdx int, row []string, h *headerIndices) (*ParsedQuestionRow
 		errs = append(errs, RowError{Row: rowIdx, Column: "Difficulty", Message: fmt.Sprintf("Invalid difficulty %q: must be EASY, MEDIUM, or HARD", rawDiff)})
 	}
 
-	topic := getVal(h.Topic)
-	if topic == "" {
-		errs = append(errs, RowError{Row: rowIdx, Column: "Topic", Message: "Topic cannot be empty"})
-	}
-
 	pattern := getVal(h.PrimaryPattern)
 	if pattern == "" {
 		errs = append(errs, RowError{Row: rowIdx, Column: "Primary Pattern", Message: "Primary Pattern cannot be empty"})
+	}
+
+	// Topic Handling: If Topic column missing or empty, derive from Pattern
+	topic := getVal(h.Topic)
+	if topic == "" {
+		topic = pattern
 	}
 
 	if len(errs) > 0 {
@@ -482,6 +640,9 @@ func validateRow(rowIdx int, row []string, h *headerIndices) (*ParsedQuestionRow
 		isCore = false
 	}
 
+	// Parse LeetCode ID
+	leetCodeID := getVal(h.LeetCodeID)
+
 	// Parse Companies
 	var companies []string
 	rawCompanies := getVal(h.Companies)
@@ -495,7 +656,7 @@ func validateRow(rowIdx int, row []string, h *headerIndices) (*ParsedQuestionRow
 		}
 	}
 
-	// Parse Editorial
+	// Parse Editorial / Notes
 	var editorialSummary *string
 	rawEditorial := getVal(h.Editorial)
 	if rawEditorial != "" {
@@ -511,8 +672,6 @@ func validateRow(rowIdx int, row []string, h *headerIndices) (*ParsedQuestionRow
 		}
 	}
 
-	slug := catalog.Slugify(title)
-
 	return &ParsedQuestionRow{
 		RowNumber:           rowIdx,
 		Title:               title,
@@ -523,6 +682,7 @@ func validateRow(rowIdx int, row []string, h *headerIndices) (*ParsedQuestionRow
 		PrimaryPattern:      pattern,
 		Subpattern:          subpattern,
 		IsCore:              isCore,
+		LeetCodeID:          leetCodeID,
 		Companies:           companies,
 		EditorialSummary:    editorialSummary,
 		SampleTimeLimitMins: timeLimit,

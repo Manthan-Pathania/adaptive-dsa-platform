@@ -3,6 +3,7 @@ package progress
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,7 +32,11 @@ type Service interface {
 	RecordAttempt(ctx context.Context, req RecordAttemptRequest) (*QuestionAttempt, *UserQuestionProgress, *RevisionSchedule, error)
 	GetUserProgressSummary(ctx context.Context, userID uuid.UUID) (*UserProgressSummary, error)
 	GetQuestionProgress(ctx context.Context, userID, questionID uuid.UUID) (*UserQuestionProgress, error)
+	ListUserProgress(ctx context.Context, userID uuid.UUID) ([]UserQuestionProgress, error)
+	QuickMark(ctx context.Context, req QuickMarkRequest) (*UserQuestionProgress, error)
+	UnmarkProgress(ctx context.Context, userID, questionID uuid.UUID) error
 	ListDueRevisions(ctx context.Context, userID uuid.UUID, limit, offset int32) ([]RevisionSchedule, int64, error)
+	ExportUserData(ctx context.Context, userID uuid.UUID) (*UserExportData, error)
 }
 
 type service struct {
@@ -222,3 +227,51 @@ func (s *service) ListDueRevisions(ctx context.Context, userID uuid.UUID, limit,
 	now := time.Now().UTC()
 	return s.repo.ListDueRevisions(ctx, userID, now, limit, offset)
 }
+
+func (s *service) ExportUserData(ctx context.Context, userID uuid.UUID) (*UserExportData, error) {
+	return s.repo.ExportUserData(ctx, userID)
+}
+
+func (s *service) ListUserProgress(ctx context.Context, userID uuid.UUID) ([]UserQuestionProgress, error) {
+	return s.repo.ListUserQuestionProgress(ctx, userID)
+}
+
+func (s *service) QuickMark(ctx context.Context, req QuickMarkRequest) (*UserQuestionProgress, error) {
+	outcome := req.Outcome
+	if !outcome.IsValid() {
+		outcome = OutcomeSolvedIndependently
+	}
+	diff := req.DifficultyExperienced
+	if !diff.IsValid() {
+		diff = PerceivedJustRight
+	}
+
+	quality := int32(4)
+	if req.NeedsRevision {
+		quality = 3
+	} else if req.ConfidenceFirstTry {
+		quality = 5
+	}
+
+	var notes *string
+	if strings.TrimSpace(req.Notes) != "" {
+		cleaned := strings.TrimSpace(req.Notes)
+		notes = &cleaned
+	}
+
+	_, prog, _, err := s.RecordAttempt(ctx, RecordAttemptRequest{
+		UserID:                req.UserID,
+		QuestionID:            req.QuestionID,
+		Outcome:               outcome,
+		TimeSpentSecs:         0,
+		DifficultyExperienced: diff,
+		QualityRating:         quality,
+		ApproachSummary:       notes,
+	})
+	return prog, err
+}
+
+func (s *service) UnmarkProgress(ctx context.Context, userID, questionID uuid.UUID) error {
+	return s.repo.DeleteUserQuestionProgress(ctx, userID, questionID)
+}
+

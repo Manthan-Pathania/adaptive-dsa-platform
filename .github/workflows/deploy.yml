@@ -1,0 +1,72 @@
+name: Production Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - staging
+          - production
+      tag:
+        description: 'Git release tag or commit SHA to deploy'
+        required: true
+        default: 'latest'
+
+concurrency:
+  group: deployment-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Linux VPS
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      # Configure environment protection rules in GitHub Repository Settings:
+      # Settings -> Environments -> production -> Required reviewers
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Deploy Gate Verification
+        run: |
+          echo "=================================================="
+          echo "Initiating release deployment for: ${{ inputs.environment }}"
+          echo "Release Reference: ${{ inputs.tag }}"
+          echo "Target Architecture: Single Linux VPS with Caddy & Docker Compose"
+          echo "=================================================="
+
+      # The following steps execute deployment on the target VPS via SSH when secrets are configured:
+      # Required Secrets:
+      #   PROD_VPS_HOST: IP or domain of the VPS
+      #   PROD_VPS_SSH_KEY: Private SSH deploy key
+      #   PROD_VPS_USER: Non-root deployment user (e.g. deployer)
+      - name: Execute Remote Deployment via SSH
+        if: ${{ env.PROD_VPS_HOST != '' }}
+        env:
+          PROD_VPS_HOST: ${{ secrets.PROD_VPS_HOST }}
+          PROD_VPS_USER: ${{ secrets.PROD_VPS_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.PROD_VPS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$PROD_VPS_HOST" >> ~/.ssh/known_hosts
+
+          ssh "$PROD_VPS_USER@$PROD_VPS_HOST" << 'EOF'
+            set -e
+            cd /opt/adaptive-dsa
+            git pull origin master
+            docker compose pull || true
+            docker compose build
+            docker compose run --rm migrate up
+            docker compose up -d --remove-orphans
+            docker compose ps
+          EOF

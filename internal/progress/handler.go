@@ -39,7 +39,11 @@ func (h *Handler) RegisterRoutes(r chi.Router, authMiddleware, requireAuth func(
 		r.Post("/questions/{id}/attempts", h.HandleRecordAttempt)
 		r.Get("/questions/{id}/progress", h.HandleGetQuestionProgress)
 		r.Get("/progress", h.HandleGetProgressSummary)
+		r.Get("/progress/all", h.HandleListAllUserProgress)
+		r.Post("/progress/quick-mark", h.HandleQuickMark)
+		r.Post("/progress/unmark", h.HandleUnmark)
 		r.Get("/revisions/due", h.HandleListDueRevisions)
+		r.Get("/user/export", h.HandleExportUserData)
 	})
 }
 
@@ -245,3 +249,135 @@ func (h *Handler) HandleListDueRevisions(w http.ResponseWriter, r *http.Request)
 		PerPage:   limit,
 	})
 }
+
+// HandleExportUserData serializes candidate learning history and exports it as an attachment.
+func (h *Handler) HandleExportUserData(w http.ResponseWriter, r *http.Request) {
+	user, ok := identity.UserFromContext(r.Context())
+	if !ok || user == nil {
+		httperr.WriteJSON(w, r, http.StatusUnauthorized, "Unauthorized", "Authentication required", "UNAUTHORIZED")
+		return
+	}
+
+	data, err := h.service.ExportUserData(r.Context(), user.ID)
+	if err != nil {
+		httperr.InternalServerError(w, r, err, h.logger)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="adaptive_dsa_learning_export.json"`)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+type QuickMarkPayload struct {
+	QuestionID            string `json:"question_id"`
+	Outcome               string `json:"outcome"`
+	DifficultyExperienced string `json:"difficulty_experienced"`
+	NeedsRevision         bool   `json:"needs_revision"`
+	ConfidenceFirstTry    bool   `json:"confidence_first_try"`
+	Notes                 string `json:"notes"`
+}
+
+func (h *Handler) HandleQuickMark(w http.ResponseWriter, r *http.Request) {
+	user, ok := identity.UserFromContext(r.Context())
+	if !ok || user == nil {
+		httperr.WriteJSON(w, r, http.StatusUnauthorized, "Unauthorized", "Authentication required", "UNAUTHORIZED")
+		return
+	}
+
+	var payload QuickMarkPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		httperr.BadRequest(w, r, "Malformed JSON request payload")
+		return
+	}
+
+	qID, err := uuid.Parse(payload.QuestionID)
+	if err != nil {
+		httperr.BadRequest(w, r, "Invalid question_id format")
+		return
+	}
+
+	outcome := AttemptOutcome(payload.Outcome)
+	if !outcome.IsValid() {
+		outcome = OutcomeSolvedIndependently
+	}
+
+	diffExp := PerceivedDifficulty(payload.DifficultyExperienced)
+	if !diffExp.IsValid() {
+		diffExp = PerceivedJustRight
+	}
+
+	prog, err := h.service.QuickMark(r.Context(), QuickMarkRequest{
+		UserID:                user.ID,
+		QuestionID:            qID,
+		Outcome:               outcome,
+		DifficultyExperienced: diffExp,
+		NeedsRevision:         payload.NeedsRevision,
+		ConfidenceFirstTry:    payload.ConfidenceFirstTry,
+		Notes:                 payload.Notes,
+	})
+	if err != nil {
+		httperr.InternalServerError(w, r, err, h.logger)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ok",
+		"progress": prog,
+	})
+}
+
+type UnmarkPayload struct {
+	QuestionID string `json:"question_id"`
+}
+
+func (h *Handler) HandleUnmark(w http.ResponseWriter, r *http.Request) {
+	user, ok := identity.UserFromContext(r.Context())
+	if !ok || user == nil {
+		httperr.WriteJSON(w, r, http.StatusUnauthorized, "Unauthorized", "Authentication required", "UNAUTHORIZED")
+		return
+	}
+
+	var payload UnmarkPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		httperr.BadRequest(w, r, "Malformed JSON request payload")
+		return
+	}
+
+	qID, err := uuid.Parse(payload.QuestionID)
+	if err != nil {
+		httperr.BadRequest(w, r, "Invalid question_id format")
+		return
+	}
+
+	if err := h.service.UnmarkProgress(r.Context(), user.ID, qID); err != nil {
+		httperr.InternalServerError(w, r, err, h.logger)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok",
+	})
+}
+
+func (h *Handler) HandleListAllUserProgress(w http.ResponseWriter, r *http.Request) {
+	user, ok := identity.UserFromContext(r.Context())
+	if !ok || user == nil {
+		httperr.WriteJSON(w, r, http.StatusUnauthorized, "Unauthorized", "Authentication required", "UNAUTHORIZED")
+		return
+	}
+
+	items, err := h.service.ListUserProgress(r.Context(), user.ID)
+	if err != nil {
+		httperr.InternalServerError(w, r, err, h.logger)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"progress": items,
+	})
+}
+

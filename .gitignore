@@ -36,3 +36,9 @@ desktop.ini
 # Docker local data volumes
 pgdata/
 redisdata/
+
+# Temporary / Scratch
+scratch/
+.agents/
+.gemini/
+*.log

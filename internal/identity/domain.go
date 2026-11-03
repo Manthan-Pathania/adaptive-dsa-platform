@@ -29,6 +29,7 @@ var (
 	ErrForbidden          = errors.New("forbidden: administrator privileges required")
 	ErrInvalidCSRF        = errors.New("invalid or missing CSRF token")
 	ErrRateLimited        = errors.New("too many authentication attempts: please try again later")
+	ErrProfileNotFound    = errors.New("user profile not found")
 )
 
 // User represents a registered platform account.
@@ -96,3 +97,22 @@ func ValidatePassword(password string) error {
 	}
 	return nil
 }
+
+// UserProfile stores candidate interview preparation preferences and onboarding state.
+type UserProfile struct {
+	UserID                uuid.UUID              `json:"user_id"`
+	TargetCompanies       []string               `json:"target_companies"`
+	TargetDate            *time.Time             `json:"target_date,omitempty"`
+	TimelineLabel         string                 `json:"timeline_label"`
+	DailyStudyMins        int32                  `json:"daily_study_mins"`
+	PreferredDays         []string               `json:"preferred_days"`
+	ExperienceLevel       string                 `json:"experience_level"`
+	FamiliarPatterns      []string               `json:"familiar_patterns"`
+	DailyGoalQuestions    int32                  `json:"daily_goal_questions"`
+	IsOnboardingCompleted bool                   `json:"is_onboarding_completed"`
+	SelectedRoadmapID     *uuid.UUID             `json:"selected_roadmap_id,omitempty"`
+	DiagnosticResults     map[string]interface{} `json:"diagnostic_results,omitempty"`
+	CreatedAt             time.Time              `json:"created_at"`
+	UpdatedAt             time.Time              `json:"updated_at"`
+}
+

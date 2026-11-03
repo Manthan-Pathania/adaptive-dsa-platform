@@ -335,3 +335,58 @@ func TestImporter_ProductionSafetyGuard(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.CreatedQuestions)
 }
+
+func TestImporter_MasterPlanFormat_PreviewAndExecute(t *testing.T) {
+	repo := catalog.NewInMemoryRepository()
+	imp := New(repo)
+
+	// User's master plan headers
+	headers := []string{"ID", "Pattern", "Subpattern", "Difficulty", "Problem", "LeetCode ID", "Progress", "Notes"}
+	data := [][]string{
+		{"1", "Arrays & Hashing", "Hash maps", "Easy", "Two Sum", "1", "Done", "Use map for complement"},
+		{"2", "Arrays & Hashing", "In-place modification", "Easy", "Move Zeroes", "283", "Attempted", "Swap non-zeros forward"},
+		{"3", "Two Pointers & Sliding Window", "Two pointers", "Easy", "Move Zeroes", "283", "Done", "Cross-listed under two pointers"},
+		{"4", "Dynamic Programming: 1D", "Tabulation", "Medium", "House Robber", "198", "Not Started", "dp[i] = max(dp[i-1], dp[i-2]+nums[i])"},
+	}
+
+	excelBuf := createTestExcel(t, headers, data)
+
+	// 1. Preview
+	preview, err := imp.Preview(context.Background(), ImportOptions{
+		Reader: bytes.NewReader(excelBuf.Bytes()),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 4, preview.TotalRowsRead)
+	assert.Equal(t, 4, preview.ValidRows)
+	assert.Equal(t, 0, preview.InvalidRows)
+	assert.Equal(t, 3, preview.UniqueQuestions)
+	assert.Equal(t, 1, preview.CrossListedRows)
+	assert.Equal(t, 3, preview.PlannedCreates)
+	assert.Equal(t, 4, len(preview.SampleRows))
+
+	// 2. Execute
+	res, err := imp.Execute(context.Background(), ImportOptions{
+		Reader:      bytes.NewReader(excelBuf.Bytes()),
+		DryRun:      false,
+		Environment: "development",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.TotalRowsRead)
+	assert.Equal(t, 4, res.ValidRows)
+	assert.Equal(t, 3, res.CreatedQuestions)
+	assert.Equal(t, 1, res.CrossListedRows)
+
+	// 3. Verify canonical URL and pattern cross-listing
+	moveZeroes, err := repo.GetQuestionBySlug(context.Background(), "move-zeroes")
+	require.NoError(t, err)
+	assert.Equal(t, "Move Zeroes", moveZeroes.Title)
+	assert.Equal(t, catalog.DifficultyEasy, moveZeroes.Difficulty)
+	assert.Equal(t, "https://leetcode.com/problems/move-zeroes/", moveZeroes.ExternalURL)
+	require.NotNil(t, moveZeroes.LeetCodeID)
+	assert.Equal(t, "283", *moveZeroes.LeetCodeID)
+
+	patterns, err := repo.GetQuestionPatterns(context.Background(), moveZeroes.ID)
+	require.NoError(t, err)
+	// Both "Arrays & Hashing" and "Two Pointers & Sliding Window" (and their subpatterns) linked!
+	assert.True(t, len(patterns) >= 2)
+}

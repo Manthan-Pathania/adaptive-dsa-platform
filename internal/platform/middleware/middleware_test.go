@@ -90,3 +90,76 @@ func TestRequestLogger_LogsCompletion(t *testing.T) {
 	assert.Contains(t, buf.String(), "status=201")
 	assert.Contains(t, buf.String(), "method=POST")
 }
+
+func TestSecurityHeaders_SetsDefensiveHeaders(t *testing.T) {
+	// 1. Development mode
+	handlerDev := SecurityHeaders(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	w := httptest.NewRecorder()
+	handlerDev.ServeHTTP(w, req)
+	resp := w.Result()
+
+	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+	assert.Equal(t, "DENY", resp.Header.Get("X-Frame-Options"))
+	assert.Equal(t, "strict-origin-when-cross-origin", resp.Header.Get("Referrer-Policy"))
+	assert.Empty(t, resp.Header.Get("Strict-Transport-Security"), "HSTS should not be set in dev")
+
+	// 2. Production mode
+	handlerProd := SecurityHeaders(true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	wProd := httptest.NewRecorder()
+	handlerProd.ServeHTTP(wProd, req)
+	respProd := wProd.Result()
+
+	assert.NotEmpty(t, respProd.Header.Get("Strict-Transport-Security"), "HSTS must be set in production")
+}
+
+func TestBodyLimit_EnforcesMaxBytes(t *testing.T) {
+	handler := BodyLimit(10)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Payload with 15 bytes exceeds limit of 10
+	largeBody := bytes.NewReader([]byte("123456789012345"))
+	req := httptest.NewRequest(http.MethodPost, "/upload", largeBody)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Result().StatusCode)
+}
+
+func TestCORS_HandlesPreflightAndAllowedOrigins(t *testing.T) {
+	allowed := []string{"http://localhost:3000", "https://app.example.com"}
+	handler := CORS(allowed)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 1. Allowed origin preflight OPTIONS
+	reqPreflight := httptest.NewRequest(http.MethodOptions, "/api/v1/auth/me", nil)
+	reqPreflight.Header.Set("Origin", "http://localhost:3000")
+	wPreflight := httptest.NewRecorder()
+	handler.ServeHTTP(wPreflight, reqPreflight)
+
+	resPreflight := wPreflight.Result()
+	assert.Equal(t, http.StatusNoContent, resPreflight.StatusCode)
+	assert.Equal(t, "http://localhost:3000", resPreflight.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "true", resPreflight.Header.Get("Access-Control-Allow-Credentials"))
+
+	// 2. Disallowed origin
+	reqBad := httptest.NewRequest(http.MethodGet, "/api/v1/questions", nil)
+	reqBad.Header.Set("Origin", "https://evil-site.com")
+	wBad := httptest.NewRecorder()
+	handler.ServeHTTP(wBad, reqBad)
+
+	resBad := wBad.Result()
+	assert.Empty(t, resBad.Header.Get("Access-Control-Allow-Origin"))
+}

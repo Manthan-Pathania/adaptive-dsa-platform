@@ -573,3 +573,88 @@ func TestTransactionRollback_OnFailure(t *testing.T) {
 	_, _, err = innerRepo.GetUserByEmail(ctx, "admin_rollback@example.com")
 	assert.ErrorIs(t, err, ErrUserNotFound, "admin user creation must be rolled back if audit log fails")
 }
+
+func TestUserProfile_GetAndUpdate(t *testing.T) {
+	svc, _, _, _, r := testIdentitySetup()
+	ctx := context.Background()
+
+	// 1. Register candidate
+	user, _, sessionToken, csrfToken, err := svc.Register(ctx, "onboarding@example.com", "Password123!", "Onboard Candidate", "127.0.0.1", "TestAgent")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	// 2. Fetch initial profile (defaults before onboarding)
+	req := httptest.NewRequest(http.MethodGet, "/auth/profile", nil)
+	req.AddCookie(&http.Cookie{Name: "test_session", Value: sessionToken})
+	req.Header.Set("X-CSRF-Token", csrfToken)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var initialProf UserProfile
+	err = json.NewDecoder(rec.Body).Decode(&initialProf)
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, initialProf.UserID)
+	assert.False(t, initialProf.IsOnboardingCompleted)
+	assert.Equal(t, int32(60), initialProf.DailyStudyMins)
+
+	// 3. Update profile with onboarding choices
+	updatePayload := `{
+		"target_companies": ["Google", "Meta"],
+		"timeline_label": "3_months",
+		"daily_study_mins": 90,
+		"preferred_days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+		"experience_level": "intermediate",
+		"familiar_patterns": ["Two Pointers", "Sliding Window"],
+		"daily_goal_questions": 3,
+		"is_onboarding_completed": true
+	}`
+	updateReq := httptest.NewRequest(http.MethodPost, "/auth/profile", strings.NewReader(updatePayload))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set("X-CSRF-Token", csrfToken)
+	updateReq.AddCookie(&http.Cookie{Name: "test_session", Value: sessionToken})
+	updateRec := httptest.NewRecorder()
+	r.ServeHTTP(updateRec, updateReq)
+
+	assert.Equal(t, http.StatusOK, updateRec.Code)
+	var updatedProf UserProfile
+	err = json.NewDecoder(updateRec.Body).Decode(&updatedProf)
+	require.NoError(t, err)
+	assert.True(t, updatedProf.IsOnboardingCompleted)
+	assert.Equal(t, []string{"Google", "Meta"}, updatedProf.TargetCompanies)
+	assert.Equal(t, int32(90), updatedProf.DailyStudyMins)
+	assert.Equal(t, int32(3), updatedProf.DailyGoalQuestions)
+
+	// 4. Verify persisted state via GET
+	getReq := httptest.NewRequest(http.MethodGet, "/auth/profile", nil)
+	getReq.AddCookie(&http.Cookie{Name: "test_session", Value: sessionToken})
+	getReq.Header.Set("X-CSRF-Token", csrfToken)
+	getRec := httptest.NewRecorder()
+	r.ServeHTTP(getRec, getReq)
+
+	assert.Equal(t, http.StatusOK, getRec.Code)
+	var persistedProf UserProfile
+	err = json.NewDecoder(getRec.Body).Decode(&persistedProf)
+	require.NoError(t, err)
+	assert.True(t, persistedProf.IsOnboardingCompleted)
+	assert.Equal(t, []string{"Two Pointers", "Sliding Window"}, persistedProf.FamiliarPatterns)
+}
+
+func TestRegistration_WelcomeCreditsHook(t *testing.T) {
+	svc, _, _, _, _ := testIdentitySetup()
+	ctx := context.Background()
+
+	hookCalled := false
+	var capturedUserID uuid.UUID
+	svc.SetOnUserRegistered(func(ctx context.Context, userID uuid.UUID) error {
+		hookCalled = true
+		capturedUserID = userID
+		return nil
+	})
+
+	user, _, _, _, err := svc.Register(ctx, "hook@example.com", "Password123!", "Hook User", "127.0.0.1", "TestAgent")
+	require.NoError(t, err)
+	assert.True(t, hookCalled)
+	assert.Equal(t, user.ID, capturedUserID)
+}
+

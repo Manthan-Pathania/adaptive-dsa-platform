@@ -112,3 +112,65 @@ func Recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 		})
 	}
 }
+
+// SecurityHeaders injects standard defensive HTTP response headers.
+func SecurityHeaders(isProduction bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			w.Header().Set("Permissions-Policy", "geolocation=(), camera=(), microphone=(), payment=(self \"https://checkout.razorpay.com\")")
+
+			if isProduction {
+				w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// BodyLimit constrains incoming request payload sizes to defend against resource exhaustion DoS.
+func BodyLimit(maxBytes int64) func(http.Handler) http.Handler {
+	if maxBytes <= 0 {
+		maxBytes = 1 << 20 // 1 MB default
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// CORS inspects incoming origins against an explicit whitelist and handles preflight OPTIONS requests.
+func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
+	originMap := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		originMap[o] = true
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				w.Header().Set("Vary", "Origin")
+				if originMap[origin] {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-CSRF-Token, X-Request-ID, X-Razorpay-Signature, X-Razorpay-Event-Id")
+					w.Header().Set("Access-Control-Max-Age", "86400")
+				}
+			}
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}

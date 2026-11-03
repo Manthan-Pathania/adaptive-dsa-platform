@@ -71,35 +71,39 @@ INSERT INTO questions (
     difficulty,
     is_core,
     editorial_summary,
-    sample_time_limit_mins
+    sample_time_limit_mins,
+    leetcode_id,
+    is_active
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8, $9
 ) ON CONFLICT (external_url) DO UPDATE
 SET title = EXCLUDED.title,
     difficulty = EXCLUDED.difficulty,
     is_core = EXCLUDED.is_core,
     editorial_summary = EXCLUDED.editorial_summary,
     sample_time_limit_mins = EXCLUDED.sample_time_limit_mins,
+    leetcode_id = COALESCE(EXCLUDED.leetcode_id, questions.leetcode_id),
+    is_active = EXCLUDED.is_active,
     updated_at = CURRENT_TIMESTAMP
-RETURNING id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, created_at, updated_at;
+RETURNING id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, leetcode_id, is_active, created_at, updated_at;
 
 -- name: GetQuestionByID :one
-SELECT id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, created_at, updated_at
+SELECT id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, leetcode_id, is_active, created_at, updated_at, excel_order
 FROM questions
 WHERE id = $1;
 
 -- name: GetQuestionBySlug :one
-SELECT id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, created_at, updated_at
+SELECT id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, leetcode_id, is_active, created_at, updated_at, excel_order
 FROM questions
 WHERE slug = $1;
 
 -- name: GetQuestionByExternalURL :one
-SELECT id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, created_at, updated_at
+SELECT id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, leetcode_id, is_active, created_at, updated_at, excel_order
 FROM questions
 WHERE external_url = $1;
 
 -- name: ListQuestions :many
-SELECT q.id, q.slug, q.title, q.external_url, q.difficulty, q.is_core, q.editorial_summary, q.sample_time_limit_mins, q.created_at, q.updated_at
+SELECT q.id, q.slug, q.title, q.external_url, q.difficulty, q.is_core, q.editorial_summary, q.sample_time_limit_mins, q.leetcode_id, q.is_active, q.created_at, q.updated_at, q.excel_order
 FROM questions q
 WHERE ($1::text = '' OR q.title ILIKE '%' || $1 || '%')
   AND ($2::text = '' OR q.difficulty::text = $2)
@@ -110,7 +114,8 @@ WHERE ($1::text = '' OR q.title ILIKE '%' || $1 || '%')
           WHERE qp.question_id = q.id AND (p.id = $3 OR p.topic_id = $3)
       )
   )
-ORDER BY q.title ASC
+  AND (sqlc.narg('is_active')::boolean IS NULL OR q.is_active = sqlc.narg('is_active'))
+ORDER BY q.excel_order ASC, q.created_at ASC
 LIMIT $4 OFFSET $5;
 
 -- name: CountQuestions :one
@@ -124,7 +129,51 @@ WHERE ($1::text = '' OR q.title ILIKE '%' || $1 || '%')
           JOIN patterns p ON qp.pattern_id = p.id
           WHERE qp.question_id = q.id AND (p.id = $3 OR p.topic_id = $3)
       )
-  );
+  )
+  AND (sqlc.narg('is_active')::boolean IS NULL OR q.is_active = sqlc.narg('is_active'));
+
+-- name: UpdateQuestion :one
+UPDATE questions
+SET title = $2,
+    difficulty = $3,
+    is_core = $4,
+    editorial_summary = $5,
+    sample_time_limit_mins = $6,
+    leetcode_id = $7,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $1
+RETURNING id, slug, title, external_url, difficulty, is_core, editorial_summary, sample_time_limit_mins, leetcode_id, is_active, created_at, updated_at;
+
+-- name: SetQuestionActive :exec
+UPDATE questions
+SET is_active = $2,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $1;
+
+-- name: RemoveQuestionPatterns :exec
+DELETE FROM question_patterns
+WHERE question_id = $1;
+
+-- name: RecordImportHistory :one
+INSERT INTO question_import_history (
+    filename,
+    total_rows,
+    valid_rows,
+    created_questions,
+    updated_questions,
+    unchanged_questions,
+    invalid_rows,
+    status,
+    imported_by
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9
+) RETURNING id, filename, total_rows, valid_rows, created_questions, updated_questions, unchanged_questions, invalid_rows, status, imported_by, created_at;
+
+-- name: ListImportHistory :many
+SELECT id, filename, total_rows, valid_rows, created_questions, updated_questions, unchanged_questions, invalid_rows, status, imported_by, created_at
+FROM question_import_history
+ORDER BY created_at DESC
+LIMIT $1 OFFSET $2;
 
 -- name: LinkQuestionPattern :exec
 INSERT INTO question_patterns (
@@ -208,6 +257,12 @@ SELECT id, user_id, title, slug, description, target_days, is_system_template, c
 FROM roadmaps
 WHERE is_system_template = TRUE
 ORDER BY title ASC;
+
+-- name: ListRoadmapsForUser :many
+SELECT id, user_id, title, slug, description, target_days, is_system_template, created_at, updated_at
+FROM roadmaps
+WHERE is_system_template = TRUE OR (user_id IS NOT NULL AND user_id = $1)
+ORDER BY is_system_template DESC, created_at DESC;
 
 -- name: AddRoadmapItem :exec
 INSERT INTO roadmap_items (

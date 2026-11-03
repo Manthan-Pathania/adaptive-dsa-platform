@@ -20,14 +20,23 @@ type Service interface {
 	ValidateSession(ctx context.Context, rawToken string) (*Session, error)
 	CreateAdmin(ctx context.Context, email, password, fullName, operatorIP string) (*User, error)
 	AuditLog(ctx context.Context, actorID *uuid.UUID, action, targetType string, targetID *uuid.UUID, ip, userAgent string, metadata map[string]interface{})
+	GetProfile(ctx context.Context, userID uuid.UUID) (*UserProfile, error)
+	UpdateProfile(ctx context.Context, profile *UserProfile) (*UserProfile, error)
+	SetOnUserRegistered(fn func(ctx context.Context, userID uuid.UUID) error)
 }
 
 // IdentityService coordinates authentication workflows, password security, and audit logging.
 type IdentityService struct {
-	repo        Repository
-	cfg         *config.Config
-	logger      *slog.Logger
-	rateLimiter *MemoryRateLimiter
+	repo             Repository
+	cfg              *config.Config
+	logger           *slog.Logger
+	rateLimiter      *MemoryRateLimiter
+	onUserRegistered func(ctx context.Context, userID uuid.UUID) error
+}
+
+// SetOnUserRegistered sets an optional post-registration hook (e.g. for welcome credit grants).
+func (s *IdentityService) SetOnUserRegistered(fn func(ctx context.Context, userID uuid.UUID) error) {
+	s.onUserRegistered = fn
 }
 
 // NewService instantiates a new IdentityService.
@@ -105,6 +114,12 @@ func (s *IdentityService) Register(ctx context.Context, email, password, fullNam
 	})
 	if err != nil {
 		return nil, nil, "", "", err
+	}
+
+	if s.onUserRegistered != nil {
+		if hookErr := s.onUserRegistered(ctx, user.ID); hookErr != nil {
+			s.logger.WarnContext(ctx, "post-registration hook error", "user_id", user.ID.String(), "error", hookErr.Error())
+		}
 	}
 
 	s.logger.InfoContext(ctx, "user registration successful",
@@ -343,3 +358,97 @@ func (s *IdentityService) createSessionWithRepo(ctx context.Context, repo Reposi
 
 	return session, rawToken, csrfToken, nil
 }
+
+// GetProfile retrieves user profile preferences or returns sensible defaults for first-time onboarding.
+func (s *IdentityService) GetProfile(ctx context.Context, userID uuid.UUID) (*UserProfile, error) {
+	p, err := s.repo.GetUserProfile(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrProfileNotFound) {
+			return &UserProfile{
+				UserID:                userID,
+				TargetCompanies:       []string{},
+				TimelineLabel:         "3_months",
+				DailyStudyMins:        60,
+				PreferredDays:         []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+				ExperienceLevel:       "intermediate",
+				FamiliarPatterns:      []string{},
+				DailyGoalQuestions:    2,
+				IsOnboardingCompleted: false,
+			}, nil
+		}
+		return nil, err
+	}
+	return p, nil
+}
+
+// UpdateProfile updates or creates the candidate preparation profile and onboarding state.
+func (s *IdentityService) UpdateProfile(ctx context.Context, profile *UserProfile) (*UserProfile, error) {
+	if profile == nil || profile.UserID == uuid.Nil {
+		return nil, errors.New("user ID is required for profile update")
+	}
+
+	existing, err := s.repo.GetUserProfile(ctx, profile.UserID)
+	if err != nil && !errors.Is(err, ErrProfileNotFound) {
+		return nil, err
+	}
+
+	if existing != nil {
+		if profile.TargetCompanies != nil {
+			existing.TargetCompanies = profile.TargetCompanies
+		}
+		if profile.TargetDate != nil {
+			existing.TargetDate = profile.TargetDate
+		}
+		if profile.TimelineLabel != "" {
+			existing.TimelineLabel = profile.TimelineLabel
+		}
+		if profile.DailyStudyMins > 0 {
+			existing.DailyStudyMins = profile.DailyStudyMins
+		}
+		if profile.PreferredDays != nil {
+			existing.PreferredDays = profile.PreferredDays
+		}
+		if profile.ExperienceLevel != "" {
+			existing.ExperienceLevel = profile.ExperienceLevel
+		}
+		if profile.FamiliarPatterns != nil {
+			existing.FamiliarPatterns = profile.FamiliarPatterns
+		}
+		if profile.DailyGoalQuestions > 0 {
+			existing.DailyGoalQuestions = profile.DailyGoalQuestions
+		}
+		if profile.SelectedRoadmapID != nil {
+			existing.SelectedRoadmapID = profile.SelectedRoadmapID
+		}
+		if profile.DiagnosticResults != nil {
+			existing.DiagnosticResults = profile.DiagnosticResults
+		}
+		existing.IsOnboardingCompleted = profile.IsOnboardingCompleted
+		profile = existing
+	} else {
+		if profile.TargetCompanies == nil {
+			profile.TargetCompanies = []string{}
+		}
+		if profile.TimelineLabel == "" {
+			profile.TimelineLabel = "3_MONTHS"
+		}
+		if profile.DailyStudyMins == 0 {
+			profile.DailyStudyMins = 60
+		}
+		if profile.PreferredDays == nil {
+			profile.PreferredDays = []string{"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
+		}
+		if profile.ExperienceLevel == "" {
+			profile.ExperienceLevel = "INTERMEDIATE"
+		}
+		if profile.FamiliarPatterns == nil {
+			profile.FamiliarPatterns = []string{}
+		}
+		if profile.DailyGoalQuestions == 0 {
+			profile.DailyGoalQuestions = 3
+		}
+	}
+
+	return s.repo.UpsertUserProfile(ctx, profile)
+}
+

@@ -37,6 +37,18 @@ func validTestConfig() Config {
 			CSRFSecret:       "super-secret-csrf-key-min-32-bytes!",
 			RateLimitAuthRPM: 15,
 		},
+		AI: AIConfig{
+			GeminiAPIKey:   "",
+			GeminiModel:    "gemini-3.8-flash",
+			GeminiTimeout:  15 * time.Second,
+			GeminiRPM:      15,
+			WelcomeCredits: 50,
+		},
+		Payments: PaymentsConfig{
+			RazorpayKeyID:         "rzp_test_placeholder_key_id",
+			RazorpayKeySecret:     "rzp_test_placeholder_key_secret",
+			RazorpayWebhookSecret: "rzp_test_placeholder_webhook_secret",
+		},
 	}
 }
 
@@ -131,6 +143,47 @@ func TestConfig_Validation(t *testing.T) {
 			expectedErr: "SESSION_COOKIE_SECURE must be true in production",
 		},
 		{
+			name: "production requires json log format",
+			mutate: func(c *Config) {
+				c.AppEnv = EnvProduction
+				c.Session.CookieSecure = true
+				c.Log.Format = "text"
+			},
+			expectedErr: "LOG_FORMAT must be json in production",
+		},
+		{
+			name: "production rejects default csrf secret",
+			mutate: func(c *Config) {
+				c.AppEnv = EnvProduction
+				c.Session.CookieSecure = true
+				c.Log.Format = "json"
+				c.Auth.CSRFSecret = "super-secret-csrf-key-min-32-bytes!"
+			},
+			expectedErr: "insecure default or placeholder CSRF_SECRET is not permitted in production",
+		},
+		{
+			name: "production rejects wildcard cors origins",
+			mutate: func(c *Config) {
+				c.AppEnv = EnvProduction
+				c.Session.CookieSecure = true
+				c.Log.Format = "json"
+				c.Auth.CSRFSecret = "a-real-production-secret-min-32-characters-long!"
+				c.Server.CORSAllowedOrigins = "*"
+			},
+			expectedErr: "wildcard CORS origins are strictly forbidden in production",
+		},
+		{
+			name: "production valid configuration",
+			mutate: func(c *Config) {
+				c.AppEnv = EnvProduction
+				c.Session.CookieSecure = true
+				c.Log.Format = "json"
+				c.Auth.CSRFSecret = "a-real-production-secret-min-32-characters-long!"
+				c.Server.CORSAllowedOrigins = "https://app.example.com,https://dsa.example.com"
+			},
+			expectedErr: "",
+		},
+		{
 			name: "csrf secret too short",
 			mutate: func(c *Config) {
 				c.Auth.CSRFSecret = "too-short"
@@ -159,6 +212,14 @@ func TestConfig_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfig_AllowedOriginsList(t *testing.T) {
+	s := ServerConfig{
+		CORSAllowedOrigins: " https://app.example.com , https://api.example.com , ",
+	}
+	origins := s.AllowedOriginsList()
+	assert.Equal(t, []string{"https://app.example.com", "https://api.example.com"}, origins)
 }
 
 func TestConfig_RedactedDatabaseURL(t *testing.T) {

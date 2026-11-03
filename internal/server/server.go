@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"time"
 
+	"github.com/adaptive-dsa/platform/internal/adaptive"
+	"github.com/adaptive-dsa/platform/internal/ai"
 	"github.com/adaptive-dsa/platform/internal/catalog"
 	"github.com/adaptive-dsa/platform/internal/config"
+	"github.com/adaptive-dsa/platform/internal/credits"
 	"github.com/adaptive-dsa/platform/internal/identity"
+	"github.com/adaptive-dsa/platform/internal/payments"
 	"github.com/adaptive-dsa/platform/internal/platform/database"
 	"github.com/adaptive-dsa/platform/internal/platform/middleware"
 	"github.com/adaptive-dsa/platform/internal/progress"
@@ -25,6 +30,10 @@ type Server struct {
 	identityService identity.Service
 	catalogService  catalog.Service
 	progressService progress.Service
+	creditsService  credits.Service
+	aiService       ai.Service
+	adaptiveService adaptive.Service
+	paymentsService payments.Service
 	httpServer      *http.Server
 	startTime       time.Time
 }
@@ -37,6 +46,10 @@ func NewServer(
 	identitySvc identity.Service,
 	catalogSvc catalog.Service,
 	progressSvc progress.Service,
+	creditsSvc credits.Service,
+	aiSvc ai.Service,
+	adaptiveSvc adaptive.Service,
+	paymentsSvc payments.Service,
 ) *Server {
 	if log == nil {
 		log = slog.Default()
@@ -49,6 +62,10 @@ func NewServer(
 		identityService: identitySvc,
 		catalogService:  catalogSvc,
 		progressService: progressSvc,
+		creditsService:  creditsSvc,
+		aiService:       aiSvc,
+		adaptiveService: adaptiveSvc,
+		paymentsService: paymentsSvc,
 		startTime:       time.Now(),
 	}
 
@@ -58,6 +75,20 @@ func NewServer(
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RequestLogger(log))
 	r.Use(middleware.Recoverer(log))
+
+	isProd := false
+	maxBody := int64(1 << 20)
+	var allowedOrigins []string
+	if s.cfg != nil {
+		isProd = s.cfg.AppEnv == config.EnvProduction
+		maxBody = s.cfg.Server.MaxBodyBytes
+		allowedOrigins = s.cfg.Server.AllowedOriginsList()
+	}
+	r.Use(middleware.SecurityHeaders(isProd))
+	r.Use(middleware.BodyLimit(maxBody))
+	if len(allowedOrigins) > 0 {
+		r.Use(middleware.CORS(allowedOrigins))
+	}
 
 	// Health and probe endpoints
 	r.Get("/healthz", s.handleHealthz)
@@ -85,7 +116,7 @@ func NewServer(
 			authHandler := identity.NewHandler(s.identityService, s.cfg)
 			authHandler.RegisterRoutes(r, authMw, csrfMw)
 
-			// Admin-only test/probe route verifying RBAC boundary
+			// Admin-only test/probe and metrics route verifying RBAC boundary
 			r.Route("/admin", func(r chi.Router) {
 				r.Use(authMw)
 				r.Use(identity.RequireAuth)
@@ -98,19 +129,54 @@ func NewServer(
 						"message": "welcome to the admin boundary",
 					})
 				})
+
+				r.Get("/metrics", s.handleAdminMetrics)
 			})
 		}
 
-		// Mount Catalog routes (questions, topics, roadmaps)
+		// Mount Catalog routes (questions, topics, roadmaps, admin question bank)
 		if s.catalogService != nil {
-			catalogHandler := catalog.NewHandler(s.catalogService, log)
-			catalogHandler.RegisterRoutes(r)
+			appEnv := "development"
+			if s.cfg != nil {
+				appEnv = s.cfg.AppEnv
+			}
+			catalogHandler := catalog.NewHandler(s.catalogService, log, appEnv)
+			catalogHandler.RegisterRoutes(r, authMw)
+			if authMw != nil {
+				catalogHandler.RegisterAdminRoutes(r, authMw, identity.RequireAuth, identity.RequireRole(identity.RoleAdmin))
+			}
 		}
 
 		// Mount Progress & Revision routes
 		if s.progressService != nil && authMw != nil {
 			progressHandler := progress.NewHandler(s.progressService, log)
 			progressHandler.RegisterRoutes(r, authMw, identity.RequireAuth)
+		}
+
+		// Mount Credits & Billing routes
+		if s.creditsService != nil && authMw != nil {
+			creditsHandler := credits.NewHandler(s.creditsService, log)
+			creditsHandler.RegisterRoutes(r, authMw, identity.RequireAuth)
+			creditsHandler.RegisterAdminRoutes(r, authMw, identity.RequireAuth, identity.RequireRole(identity.RoleAdmin))
+		}
+
+		// Mount AI Tutoring routes
+		if s.aiService != nil && authMw != nil {
+			aiHandler := ai.NewHandler(s.aiService, log, s.identityService)
+			aiHandler.RegisterRoutes(r, authMw, identity.RequireAuth)
+		}
+
+		// Mount Adaptive Preparation Engine routes
+		if s.adaptiveService != nil && authMw != nil {
+			adaptiveHandler := adaptive.NewHandler(s.adaptiveService, log)
+			adaptiveHandler.RegisterRoutes(r, authMw, identity.RequireAuth)
+		}
+
+		// Mount Payments & Webhooks routes
+		if s.paymentsService != nil && authMw != nil {
+			csrfMw := identity.RequireCSRF(csrfSecret)
+			paymentsHandler := payments.NewHandler(s.paymentsService, log)
+			paymentsHandler.RegisterRoutes(r, authMw, identity.RequireAuth, csrfMw, identity.RequireRole(identity.RoleAdmin))
 		}
 	})
 
@@ -222,4 +288,44 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleAdminMetrics provides structured operational diagnostics for administrators.
+func (s *Server) handleAdminMetrics(w http.ResponseWriter, r *http.Request) {
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	metrics := map[string]any{
+		"app_env":        s.cfg.AppEnv,
+		"uptime_seconds": int64(time.Since(s.startTime).Seconds()),
+		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+		"runtime": map[string]any{
+			"goroutines":       runtime.NumGoroutine(),
+			"heap_alloc_bytes": memStats.HeapAlloc,
+			"heap_sys_bytes":   memStats.HeapSys,
+			"num_gc":           memStats.NumGC,
+		},
+	}
+
+	if s.db != nil {
+		dbHealth := s.db.Health(r.Context())
+		metrics["database"] = map[string]any{
+			"available":      dbHealth.Available,
+			"latency_ms":     float64(dbHealth.Latency.Microseconds()) / 1000.0,
+			"total_conns":    dbHealth.TotalConns,
+			"idle_conns":     dbHealth.IdleConns,
+			"acquired_conns": dbHealth.AcquiredConns,
+			"max_conns":      dbHealth.MaxConns,
+		}
+	}
+
+	if s.paymentsService != nil {
+		if stats, err := s.paymentsService.GetJobStats(r.Context()); err == nil {
+			metrics["background_jobs"] = stats
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(metrics)
 }

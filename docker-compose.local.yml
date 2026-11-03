@@ -1,0 +1,138 @@
+version: '3.8'
+
+# ==============================================================================
+# Adaptive DSA Platform - Local Evaluation Stack (Docker Compose)
+# Zero external credentials required: Uses built-in Mock AI & Mock Payments
+# ==============================================================================
+
+services:
+  # 1. PostgreSQL 16
+  postgres:
+    image: postgres:16-alpine
+    container_name: adaptive_dsa_local_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dsa_user
+      POSTGRES_PASSWORD: dsa_password
+      POSTGRES_DB: dsa_db
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - local_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dsa_user -d dsa_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+    networks:
+      - local_net
+
+  # 2. Database Migrations & Initial Question Seed
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: adaptive_dsa_local_migrate
+    entrypoint: ["/bin/sh", "-c", "/app/migrate up"]
+    environment:
+      DATABASE_URL: postgres://dsa_user:dsa_password@postgres:5432/dsa_db?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - local_net
+
+  # 3. Go REST API Monolith
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: adaptive_dsa_local_backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      APP_ENV: development
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      DATABASE_URL: postgres://dsa_user:dsa_password@postgres:5432/dsa_db?sslmode=disable
+      DB_MAX_CONNS: 15
+      DB_MIN_CONNS: 2
+      LOG_LEVEL: info
+      LOG_FORMAT: text
+      SESSION_COOKIE_NAME: session_token
+      SESSION_COOKIE_SECURE: "false"
+      CSRF_SECRET: super-secret-csrf-key-min-32-bytes!
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,http://localhost
+      WELCOME_CREDITS: 50
+      USE_MOCK_AI: "true"
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+    networks:
+      - local_net
+
+  # 4. Next.js Frontend
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: adaptive_dsa_local_frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      BACKEND_API_URL: http://backend:8080
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - local_net
+
+  # 5. Caddy Edge Reverse Proxy (Provides unified access on http://localhost)
+  caddy:
+    image: caddy:2-alpine
+    container_name: adaptive_dsa_local_caddy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    networks:
+      - local_net
+
+networks:
+  local_net:
+    driver: bridge
+
+volumes:
+  local_pgdata:
+    name: adaptive_dsa_local_pgdata
