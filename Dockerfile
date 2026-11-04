@@ -54,6 +54,7 @@ COPY --from=builder /app/migrate /app/migrate
 COPY --from=builder /app/admin /app/admin
 COPY --from=builder /app/import-questions /app/import-questions
 COPY --from=builder /build/migrations /app/migrations
+COPY data/ /app/data/
 
 # Non-root runtime user
 USER 10001:10001
