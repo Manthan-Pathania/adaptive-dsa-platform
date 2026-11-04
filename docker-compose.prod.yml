@@ -144,3 +144,4 @@ volumes:
     name: adaptive_dsa_caddy_data
   caddy_config:
     name: adaptive_dsa_caddy_config
+
