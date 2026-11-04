@@ -5,11 +5,10 @@
 {
     # Global options
     admin off
-    auto_https off # Managed via compose or explicit TLS directive in production
 }
 
-# HTTP / Edge Entrypoint
-:80 {
+# Edge Entrypoint with Automatic TLS for Production Domain
+{$DOMAIN:prepinterview.site}, www.{$DOMAIN:prepinterview.site} {
     encode zstd gzip
 
     # Defensive Security Headers
