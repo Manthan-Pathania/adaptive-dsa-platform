@@ -1,72 +1,109 @@
-name: Production Deployment
+name: Build & Deploy to Oracle Cloud
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Deployment target environment'
-        required: true
-        default: 'production'
-        type: choice
-        options:
-          - staging
-          - production
-      tag:
-        description: 'Git release tag or commit SHA to deploy'
-        required: true
-        default: 'latest'
 
-concurrency:
-  group: deployment-${{ inputs.environment }}
-  cancel-in-progress: false
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
 
 jobs:
-  deploy:
-    name: Deploy to Linux VPS
+  build-and-push:
+    name: Build & Push Production Images
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ inputs.environment }}
-      # Configure environment protection rules in GitHub Repository Settings:
-      # Settings -> Environments -> production -> Required reviewers
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          ref: ${{ inputs.tag }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Deploy Gate Verification
+      - name: Extract Repository Owner (Lowercase)
+        id: repo_owner
+        run: echo "owner=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      # 1. Build and Push Go Backend
+      - name: Build & Push Backend Container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/adaptive-dsa-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 2. Build and Push Next.js Frontend
+      - name: Build & Push Frontend Container
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/adaptive-dsa-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Oracle Cloud VM
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check Deployment Secrets
+        id: check_secrets
         run: |
-          echo "=================================================="
-          echo "Initiating release deployment for: ${{ inputs.environment }}"
-          echo "Release Reference: ${{ inputs.tag }}"
-          echo "Target Architecture: Single Linux VPS with Caddy & Docker Compose"
-          echo "=================================================="
+          if [ -n "${{ secrets.ORACLE_HOST }}" ] && [ -n "${{ secrets.ORACLE_SSH_KEY }}" ]; then
+            echo "configured=true" >> $GITHUB_OUTPUT
+          else
+            echo "configured=false" >> $GITHUB_OUTPUT
+            echo "::notice::Oracle Cloud secrets (ORACLE_HOST, ORACLE_SSH_KEY) not yet configured in GitHub Repository Settings. Images built and ready in GHCR."
+          fi
 
-      # The following steps execute deployment on the target VPS via SSH when secrets are configured:
-      # Required Secrets:
-      #   PROD_VPS_HOST: IP or domain of the VPS
-      #   PROD_VPS_SSH_KEY: Private SSH deploy key
-      #   PROD_VPS_USER: Non-root deployment user (e.g. deployer)
-      - name: Execute Remote Deployment via SSH
-        if: ${{ env.PROD_VPS_HOST != '' }}
-        env:
-          PROD_VPS_HOST: ${{ secrets.PROD_VPS_HOST }}
-          PROD_VPS_USER: ${{ secrets.PROD_VPS_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.PROD_VPS_SSH_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H "$PROD_VPS_HOST" >> ~/.ssh/known_hosts
+      - name: Copy Compose and Caddy configuration to VM
+        if: steps.check_secrets.outputs.configured == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER || 'ubuntu' }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          source: "docker-compose.prod.yml,Caddyfile"
+          target: "/opt/adaptive-dsa"
 
-          ssh "$PROD_VPS_USER@$PROD_VPS_HOST" << 'EOF'
+      - name: Run Remote Deployment via SSH
+        if: steps.check_secrets.outputs.configured == 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER || 'ubuntu' }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
             set -e
             cd /opt/adaptive-dsa
-            git pull origin master
-            docker compose pull || true
-            docker compose build
-            docker compose run --rm migrate up
-            docker compose up -d --remove-orphans
-            docker compose ps
-          EOF
+            
+            # Pull latest pre-compiled images from GHCR
+            sudo docker compose -f docker-compose.prod.yml pull
+            
+            # Run database migrations
+            sudo docker compose -f docker-compose.prod.yml run --rm migrate
+            
+            # Restart services
+            sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            
+            # Clean up old unused images to save disk space
+            sudo docker image prune -f

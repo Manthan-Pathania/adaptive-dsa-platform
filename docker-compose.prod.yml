@@ -1,0 +1,146 @@
+services:
+  # 1. PostgreSQL 16 - Private Internal Storage
+  postgres:
+    image: postgres:16-alpine
+    container_name: adaptive_dsa_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dsa_prod_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in production}
+      POSTGRES_DB: ${POSTGRES_DB:-adaptive_dsa_prod}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dsa_prod_user} -d ${POSTGRES_DB:-adaptive_dsa_prod}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 256M
+    networks:
+      - platform_net
+
+  # 2. Schema Migrations - Goose migrations before backend starts
+  migrate:
+    image: ghcr.io/manthan-pathania/adaptive-dsa-backend:latest
+    container_name: adaptive_dsa_migrate
+    entrypoint: ["/app/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dsa_prod_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-adaptive_dsa_prod}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - platform_net
+
+  # 3. Go Modular Monolith REST API & Background Job Worker
+  backend:
+    image: ghcr.io/manthan-pathania/adaptive-dsa-backend:latest
+    container_name: adaptive_dsa_backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-dsa_prod_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-adaptive_dsa_prod}?sslmode=disable
+      DB_MAX_CONNS: 10
+      DB_MIN_CONNS: 2
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      SESSION_COOKIE_NAME: session_token
+      SESSION_COOKIE_SECURE: "true"
+      CSRF_SECRET: ${CSRF_SECRET:?CSRF_SECRET must be set in production}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://prepinterview.site,https://www.prepinterview.site}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 200M
+    networks:
+      - platform_net
+
+  # 4. Next.js Frontend (Standalone Mode)
+  frontend:
+    image: ghcr.io/manthan-pathania/adaptive-dsa-frontend:latest
+    container_name: adaptive_dsa_frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      BACKEND_API_URL: http://backend:8080
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 300M
+    networks:
+      - platform_net
+
+  # 5. Caddy Edge Reverse Proxy (Automatic TLS, HTTPS, Compression)
+  caddy:
+    image: caddy:2-alpine
+    container_name: adaptive_dsa_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-prepinterview.site}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 100M
+    networks:
+      - platform_net
+
+networks:
+  platform_net:
+    driver: bridge
+
+volumes:
+  pgdata:
+    name: adaptive_dsa_pgdata
+  caddy_data:
+    name: adaptive_dsa_caddy_data
+  caddy_config:
+    name: adaptive_dsa_caddy_config
