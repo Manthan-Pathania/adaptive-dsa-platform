@@ -274,4 +274,3 @@ func (s *service) QuickMark(ctx context.Context, req QuickMarkRequest) (*UserQue
 func (s *service) UnmarkProgress(ctx context.Context, userID, questionID uuid.UUID) error {
 	return s.repo.DeleteUserQuestionProgress(ctx, userID, questionID)
 }
-

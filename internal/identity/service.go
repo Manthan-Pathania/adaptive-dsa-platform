@@ -451,4 +451,3 @@ func (s *IdentityService) UpdateProfile(ctx context.Context, profile *UserProfil
 
 	return s.repo.UpsertUserProfile(ctx, profile)
 }
-

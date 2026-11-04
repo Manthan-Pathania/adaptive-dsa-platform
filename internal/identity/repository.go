@@ -470,4 +470,3 @@ func (r *SQLRepository) UpsertUserProfile(ctx context.Context, p *UserProfile) (
 	}
 	return &res, nil
 }
-

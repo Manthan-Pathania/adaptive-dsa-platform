@@ -255,4 +255,3 @@ func (m *InMemoryRepository) UpsertUserProfile(ctx context.Context, profile *Use
 	res := cp
 	return &res, nil
 }
-

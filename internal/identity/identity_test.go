@@ -657,4 +657,3 @@ func TestRegistration_WelcomeCreditsHook(t *testing.T) {
 	assert.True(t, hookCalled)
 	assert.Equal(t, user.ID, capturedUserID)
 }
-

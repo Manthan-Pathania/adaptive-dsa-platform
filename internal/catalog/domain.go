@@ -217,18 +217,18 @@ type SamplePreviewRow struct {
 
 // ImportPreviewResult provides a pre-import validation scorecard.
 type ImportPreviewResult struct {
-	DetectedSheet      string             `json:"detected_sheet"`
-	TotalRowsRead      int                `json:"total_rows_read"`
-	ValidRows          int                `json:"valid_rows"`
-	InvalidRows        int                `json:"invalid_rows"`
-	UniqueQuestions    int                `json:"unique_questions"`
-	CrossListedRows    int                `json:"cross_listed_rows"`
-	PlannedCreates     int                `json:"planned_creates"`
-	PlannedUpdates     int                `json:"planned_updates"`
-	PlannedUnchanged   int                `json:"planned_unchanged"`
-	SampleRows         []SamplePreviewRow `json:"sample_rows"`
-	RowErrors          []RowError         `json:"row_errors,omitempty"`
-	Warnings           []string           `json:"warnings,omitempty"`
+	DetectedSheet    string             `json:"detected_sheet"`
+	TotalRowsRead    int                `json:"total_rows_read"`
+	ValidRows        int                `json:"valid_rows"`
+	InvalidRows      int                `json:"invalid_rows"`
+	UniqueQuestions  int                `json:"unique_questions"`
+	CrossListedRows  int                `json:"cross_listed_rows"`
+	PlannedCreates   int                `json:"planned_creates"`
+	PlannedUpdates   int                `json:"planned_updates"`
+	PlannedUnchanged int                `json:"planned_unchanged"`
+	SampleRows       []SamplePreviewRow `json:"sample_rows"`
+	RowErrors        []RowError         `json:"row_errors,omitempty"`
+	Warnings         []string           `json:"warnings,omitempty"`
 }
 
 // ImportOptions configures the importer execution.

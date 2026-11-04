@@ -493,4 +493,3 @@ func (s *service) GenerateRoadmapTemplate(ctx context.Context) ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
-

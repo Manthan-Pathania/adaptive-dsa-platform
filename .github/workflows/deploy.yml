@@ -84,6 +84,7 @@ jobs:
           key: ${{ secrets.ORACLE_SSH_KEY }}
           source: "docker-compose.prod.yml,Caddyfile"
           target: "/opt/adaptive-dsa"
+          overwrite: true
 
       - name: Run Remote Deployment via SSH
         if: steps.check_secrets.outputs.configured == 'true'

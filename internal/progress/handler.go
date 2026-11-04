@@ -380,4 +380,3 @@ func (h *Handler) HandleListAllUserProgress(w http.ResponseWriter, r *http.Reque
 		"progress": items,
 	})
 }
-

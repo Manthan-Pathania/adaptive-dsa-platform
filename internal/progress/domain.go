@@ -217,4 +217,3 @@ type QuickMarkRequest struct {
 	ConfidenceFirstTry    bool                `json:"confidence_first_try"`
 	Notes                 string              `json:"notes"`
 }
-

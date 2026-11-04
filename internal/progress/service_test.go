@@ -329,4 +329,3 @@ func TestService_ExportUserData(t *testing.T) {
 	assert.Equal(t, 2, len(export.Revisions))
 	assert.False(t, export.ExportedAt.IsZero())
 }
-
